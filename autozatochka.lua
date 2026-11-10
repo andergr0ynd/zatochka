@@ -1,11 +1,10 @@
 --[[
-    Автозаточка Arizona через CEF. Окно как было (/mt).
-    RPC только копирует строки/числа, клики и звук — в main (как ABarz).
+    Автозаточка Arizona (CEF). Команда /mt
 ]]
-script_name('autozatochka.lua')
-script_version('v1.06')
-script_author('Auto')
-script_description('Автоматическая заточка через CEF интерфейс')
+script_name('AutoZatochka')
+script_version('1.26')
+script_author('andergr0ynd')
+script_description('Автозаточка Arizona: одежда, оружие, Эликсир мастер (карты)')
 
 local ok_ev, sampev = pcall(require, 'lib.samp.events')
 if not ok_ev then ok_ev, sampev = pcall(require, 'samp.events') end
@@ -14,7 +13,7 @@ local ok_imgui, imgui = pcall(require, 'mimgui')
 if not ok_imgui then
     function main()
         while not isSampAvailable() do wait(100) end
-        sampAddChatMessage('[AutoZatochka] Нужен mimgui', -1)
+        sampAddChatMessage(u8:decode('[AutoZatochka] Нужен mimgui'), -1)
     end
     return
 end
@@ -32,19 +31,14 @@ local arizona = nil
 local WinState, playSound, SetWin = new.bool(), new.bool(), new.bool()
 local status = false
 local max_toch = 0
-local button_id = 0
 
 -- Звук при успешной заточке (скачивается с GitHub / CDN)
-local GITHUB_RAW_BASE = 'https://github.com/andergr0ynd/zvyk/raw/refs/heads/main/'
-local GITHUB_CDN_BASE = 'https://cdn.jsdelivr.net/gh/andergr0ynd/zvyk@main/'
-local RAW_GH_BASE = 'https://raw.githubusercontent.com/andergr0ynd/zvyk/refs/heads/main/'
-local SOUND_URL = GITHUB_RAW_BASE .. 'applepay.mp3'
+local GITHUB_RAW_BASE = 'https://github.com/andergr0ynd/zatochka/raw/refs/heads/main/'
+local GITHUB_CDN_BASE = 'https://cdn.jsdelivr.net/gh/andergr0ynd/zatochka@main/'
+local RAW_GH_BASE = 'https://raw.githubusercontent.com/andergr0ynd/zatochka/refs/heads/main/'
 local SOUND_FILENAME = 'applepay.mp3'
 local SOUND_SUBDIR = 'autozatochka'
 local success_sound_stream = nil
-
-local VERSION_JSON_URL = GITHUB_RAW_BASE .. 'version.json'
-local SCRIPT_UPDATE_URL = GITHUB_RAW_BASE .. 'autozatochka.lua'
 
 local function ensureDirForFile(path)
     local dir = path:match('^(.*\\)[^\\]+$')
@@ -144,51 +138,63 @@ local function mirrorUrlsFor(relative_path)
     }
 end
 
-local function scriptFileLooksLikeLua(path)
-    local fh = io.open(path, 'rb')
-    if not fh then return false end
-    local s = fh:read('*a') or ''
-    fh:close()
-    if #s < 80 then return false end
-    if contentLooksLikeHtml(s) then return false end
-    return s:find('function') ~= nil or s:find('script_name') ~= nil or s:find('require') ~= nil
-end
-
--- Если в version.json битый updateurl (как .../autozatochka.lua) — берём SCRIPT_UPDATE_URL
-local function resolveScriptUpdateUrl(meta)
-    local url = meta and meta.updateurl
-    if type(url) == 'string' and #url > 12 and url:find('^https?://') and url:find('%.lua') then
-        if not url:find('%.%.%.') then
-            return url
-        end
-    end
-    return SCRIPT_UPDATE_URL
-end
-
 local as_action = require('moonloader').audiostream_state
 
--- Автообновление скрипта с GitHub (как в Cerberus.lua, с проверкой на nil)
--- version.json: latest, updateurl
 if not decodeJson then
     local ok, j = pcall(require, 'json')
     if ok and j and j.decode then decodeJson = j.decode end
 end
+if type(decodeJson) == 'function' and not _G.__azJsonWrapped then
+    _G.__azJsonWrapped = true
+    local rawDecodeJson = decodeJson
+    decodeJson = function(s)
+        if type(s) ~= 'string' then return nil end
+        local t = s:gsub('^%s+', ''):gsub('%s+$', '')
+        local c = t:sub(1, 1)
+        if c == '[' then
+            if t:match('^%[%s*%]') then return {} end
+            t = '{"az":' .. t .. '}'
+        else
+            if c ~= '{' then
+                return nil
+            end
+        end
+        local ok, data = pcall(rawDecodeJson, t)
+        if not ok or data == nil then return nil end
+        if c == '[' then
+            if type(data) == 'table' then return data.az end
+            return nil
+        end
+        return data
+    end
+end
+
 
 local function safeDecodeJson(raw)
-    if type(raw) ~= 'string' then return false, nil end
+    if type(raw) ~= 'string' or not decodeJson then return false, nil end
     local s = raw:gsub('^%s+', ''):gsub('%s+$', '')
     if s == '' or s == 'null' then return false, nil end
-    local first = s:sub(1, 1)
-    if first ~= '{' and first ~= '[' then return false, nil end
-    if first == '[' and s:match('^%[%s*%]') then return true, {} end
+    if s:sub(1, 1) ~= '{' then return false, nil end
     local ok, data = pcall(decodeJson, s)
     if not ok or data == nil then return false, nil end
     return true, data
 end
 
-local incomingCef, incomingChat, incomingTd = {}, {}, {}
+local incomingCef, incomingChat = {}, {}
 local function queueCef(str)
     if type(str) ~= 'string' or str == '' then return end
+    if str:find('playerInventory', 1, true) then
+        pcall(parsePlayerInventory, str)
+        return
+    end
+    if str:find('event.storage', 1, true) then return end
+    local keep = str:find('workShop', 1, true)
+        or str:find('setWorkshop', 1, true)
+        or str:find('setResourceNeedItems', 1, true)
+        or str:find('updateEnchantSlots', 1, true)
+        or str:find('event.notify.initialize', 1, true)
+        or str:find('startEnchant', 1, true)
+    if not keep then return end
     incomingCef[#incomingCef + 1] = str .. ''
     if #incomingCef > 40 then table.remove(incomingCef, 1) end
 end
@@ -197,119 +203,9 @@ local function queueChat(text)
     incomingChat[#incomingChat + 1] = text .. ''
     if #incomingChat > 40 then table.remove(incomingChat, 1) end
 end
-local function queueTd(item)
-    if type(item) ~= 'table' then return end
-    incomingTd[#incomingTd + 1] = item
-    if #incomingTd > 80 then table.remove(incomingTd, 1) end
-end
--- Авто-проверка при входе; кнопка «Проверить обновления» всегда вызывает Update.check
-local enable_autoupdate = true
-local autoupdate_loaded = false
-local Update = nil
 
--- v6.9 и 6.9 считаем одной версией; обновление только если удалённая версия численно новее (а не просто строка ~=)
-local function scriptVersionForCompare(ver)
-    if ver == nil then return '' end
-    local s = tostring(ver):lower():gsub('^%s+', ''):gsub('%s+$', '')
-    if s:sub(1, 1) == 'v' then
-        s = s:sub(2)
-    end
-    return s
-end
-
-local function versionNumericTuple(ver)
-    local s = scriptVersionForCompare(ver)
-    local t = {}
-    for n in s:gmatch('%d+') do
-        t[#t + 1] = tonumber(n) or 0
-    end
-    if #t == 0 then return nil end
-    return t
-end
-
---- @return -1 если a старше b, 0 если равны, 1 если a новее b; nil если не удалось разобрать
-local function compareSemanticVersions(a, b)
-    local ta, tb = versionNumericTuple(a), versionNumericTuple(b)
-    if not ta or not tb then return nil end
-    local n = math.max(#ta, #tb)
-    for i = 1, n do
-        local x, y = ta[i] or 0, tb[i] or 0
-        if x < y then return -1 end
-        if x > y then return 1 end
-    end
-    return 0
-end
-
-local function remoteIsNewerThanLocal(localVer, remoteVer)
-    local cmp = compareSemanticVersions(localVer, remoteVer)
-    if cmp ~= nil then
-        return cmp < 0
-    end
-    return false
-end
-
-if decodeJson then
-    Update = {
-        json_url = VERSION_JSON_URL,
-        prefix = "[AutoZatochka]: ",
-        url = "https://github.com/andergr0ynd/zvyk",
-        check = function(json_url_base, prefix, url, silent)
-            prefix = prefix or ""
-            json_url_base = json_url_base or Update.json_url
-            local function tell(msg)
-                if silent then return end
-                sampAddChatMessage(prefix .. u8:decode(msg), -1)
-            end
-            local tmp = os.tmpname()
-            if doesFileExist(tmp) then pcall(os.remove, tmp) end
-            if not downloadToFileMirrors(mirrorUrlsFor('version.json'), tmp, 25) then
-                tell('Не удалось скачать version.json.')
-                return
-            end
-            local f = io.open(tmp, 'rb')
-            if not f then
-                tell('Не могу прочитать version.json.')
-                return
-            end
-            local raw = f:read('*a')
-            f:close()
-            pcall(os.remove, tmp)
-            local okj, l = safeDecodeJson(raw or '')
-            if not okj or type(l) ~= 'table' or not l.latest then
-                tell('Неверный version.json или он отсутствует в репозитории.')
-                return
-            end
-            local cur = thisScript().version
-            if scriptVersionForCompare(l.latest) == '' or not remoteIsNewerThanLocal(cur, l.latest) then
-                tell('Установлена актуальная версия ' .. tostring(cur) .. '.')
-                return
-            end
-            local updateUrl = resolveScriptUpdateUrl(l)
-            lua_thread.create(function()
-                local m = -1
-                sampAddChatMessage(prefix .. u8:decode("Обнаружено обновление. Пытаюсь обновиться c " .. tostring(cur) .. " на " .. tostring(l.latest)), m)
-                wait(250)
-                local scriptPath = thisScript().path
-                local scriptUrls = mirrorUrlsFor('autozatochka.lua')
-                if updateUrl and updateUrl ~= scriptUrls[1] and updateUrl ~= scriptUrls[2] and updateUrl ~= scriptUrls[3] then
-                    table.insert(scriptUrls, 1, updateUrl)
-                end
-                local ok = downloadToFileMirrors(scriptUrls, scriptPath, 60)
-                if ok and scriptFileLooksLikeLua(scriptPath) then
-                    sampAddChatMessage(prefix .. u8:decode("Обновление завершено!"), m)
-                    wait(150)
-                    thisScript():reload()
-                else
-                    sampAddChatMessage(prefix .. u8:decode("Обновление прошло неудачно. Запускаю устаревшую версию.."), m)
-                end
-            end)
-        end
-    }
-    autoupdate_loaded = true
-end
-
--- Синхронизация lib/arizona-events с GitHub → moonloader\lib\arizona-events
--- Источник на GitHub: zvyk/arizona-events/*.lua (raw). На диск: moonloader\lib\arizona-events\
+-- Синхронизация lib/arizona-events с GitHub -> moonloader\lib\arizona-events
+-- Источник на GitHub: zatochka/arizona-events/*.lua (raw). На диск: moonloader\lib\arizona-events\
 -- Если файлов нет или они битые — скрипт качает, перезагружается, затем продолжает работу.
 local LIB_ARIZONA_EVENTS_DIR = 'lib\\arizona-events'
 local LIB_ARIZONA_EVENTS_FILES = { 'init.lua', 'core.lua', 'bitstream.lua', 'subprocess.lua' }
@@ -363,13 +259,10 @@ local function syncArizonaEventsLib(force_all)
         local need = force_all or not doesFileExist(path) or libFileLooksBad(path)
         if need then
             local rel = 'arizona-events/' .. name
-            local ok, usedUrl = downloadToFileMirrors(mirrorUrlsFor(rel), path, 45)
-            if ok and not libFileLooksBad(path) then
-                print('[AutoZatochka] ' .. u8:decode('Библиотека сохранена: ') .. LIB_ARIZONA_EVENTS_DIR .. '\\' .. name)
-            else
+            local ok = downloadToFileMirrors(mirrorUrlsFor(rel), path, 45)
+            if not ok or libFileLooksBad(path) then
                 all_ok = false
                 if doesFileExist(path) then pcall(os.remove, path) end
-                print('[AutoZatochka] ' .. u8:decode('Не удалось скачать: ') .. name .. ' (' .. tostring(usedUrl or rel) .. ')')
             end
         end
     end
@@ -377,230 +270,423 @@ local function syncArizonaEventsLib(force_all)
 end
 
 -- Stone
-local tochi, workshop_check, stone_check = false, false, false
+local workshop_check = false
 local lost_stone_onLVL, all_lost = 0, 0
-local stone = {}
 local lost_stone = {}
 local enchantSlotsData = { index = -1, left = -1, right = -1, color = -1 }
 local ws = {
-    chance = -1,
-    cost = -1,
     available = 0,
     busy = false,
     busyAt = 0,
     pendingResult = nil,
     stoneSlot = -1,
     stoneAmount = 0,
-    stoneSlots = {},
     itemSlot = -1,
     itemId = -1,
     itemEnchant = -1,
     leftNeed = 0,
     rightNeed = 1,
     lastPlaceAt = 0,
-    lastPlaceJson = '',
     tab = 0,
     gunCtx = false,
     resSlot = -1,
     resAmount = 0,
-    leftOn = false,
-    rightOn = false,
     gAll = 0,
     gLvl = 0,
     gRows = {},
+    aAll = 0,
+    aLvl = 0,
+    aRows = {},
+    dAll = 0,
+    dLvl = 0,
+    dRows = {},
+    vAll = 0,
+    vLvl = 0,
+    vRows = {},
+    screen = 'home',
+    shop = nil,
+    picker = nil,
+    rightItemId = -1,
+    amuletNeed = false, -- true только по чату «используйте 'Точильный амулет'»
     slots1187 = {},
     slots10253 = {},
     slots511 = {},
+    slots8701 = {},
+    slots510 = {},
+    slots5736 = {},
+    slots1420 = {},
+    invTd = {},
+    cefInv = false,
+    -- Эликсир мастер (текстдравы): 2 карты → Улучшить
+    cAll = 0,
+    cLvl = 0,
+    cRows = {},
+    card = {
+        open = false,
+        seenAt = 0,
+        leftTd = -1,
+        rightTd = -1,
+        improveTd = -1,
+        leftFilled = false,
+        rightFilled = false,
+        improveReady = false,
+        inv = {}, -- [slot] = { id, level, sel, x }
+        lastClickAt = 0,
+        waitingChat = false, -- после Улучшить ждём Увы/Успех
+        placed = 0, -- сколько карт взяли из инвентаря в этой попытке (правый слот часто фантом)
+        step = 'idle',
+    },
 }
 
-local wz = {
-    enabled = false,
-    path = nil,
-    n = 0,
-    lastState = '',
-    needDump = false,
-    lastDump = 0,
-    miss = {},
-    outQ = {},
-    needleZ = u8:decode('заточ'),
-    needleW = u8:decode('верстак'),
-    needleS = u8:decode('точил'),
-    jsDump = [[
-        try {
-            var out = [];
-            out.push('href=' + String(location.href || ''));
-            out.push('title=' + String(document.title || ''));
-            var body = (document.body && (document.body.innerText || document.body.textContent) || '');
-            out.push('body=' + String(body).replace(/\s+/g, ' ').slice(0, 500));
-            var nodes = document.querySelectorAll('[class*="enchant"],[class*="Enchant"],[class*="workshop"],[class*="Workshop"],[class*="slot"],button,[role="button"],[class*="inventory"]');
-            out.push('nodes=' + nodes.length);
-            var i, n, shown = 0;
-            for (i = 0; i < nodes.length && shown < 45; i++) {
-                n = nodes[i];
-                var r = n.getBoundingClientRect();
-                if (r.width < 2 && r.height < 2) continue;
-                shown++;
-                out.push('N' + shown + ' tag=' + n.tagName
-                    + ' cls=' + String(n.className || '').toString().slice(0, 90)
-                    + ' id=' + String(n.id || '')
-                    + ' txt=' + String(n.innerText || '').replace(/\s+/g, ' ').slice(0, 70)
-                    + ' wh=' + Math.round(r.width) + 'x' + Math.round(r.height)
-                    + ' slot=' + String(n.getAttribute('data-slot') || n.getAttribute('data-index') || ''));
-            }
-            var imgs = document.querySelectorAll('img');
-            var c1187 = 0;
-            for (i = 0; i < imgs.length; i++) {
-                var a = (imgs[i].getAttribute('alt') || '') + ' ' + (imgs[i].getAttribute('src') || '');
-                if (a.indexOf('1187') === -1) continue;
-                c1187++;
-                var it = imgs[i].closest('[data-slot], .inventory-item-hoc, [class*="item"]');
-                out.push('img1187 alt=' + String(imgs[i].getAttribute('alt') || '')
-                    + ' slot=' + String((it && (it.getAttribute('data-slot') || it.getAttribute('data-index'))) || '?'));
-            }
-            out.push('count1187=' + c1187);
-            out.push('stoneSlot=' + String(window.stoneSlotNumber));
-            out.push('enchantSlot=' + String(window.enchantSlotNumber));
-            out.push('workshopOpen=' + String(window.workshopOpen));
-            out.push('workshopDetected=' + String(window.workshopDetected));
-            window.__azDump = out.join('\n');
-        } catch (e) {
-            window.__azDump = 'err ' + e;
-        }
-    ]],
+-- Сетка инвентаря игрока, как в ArzMarket: экранная позиция текстдрава -> слот 0..35.
+-- 6 колонок, шаг по X ~26.5; 6 рядов, шаг по Y ~30.5. Страница инвентаря = 36 слотов.
+local INV_XS = { 325, 351.5, 378, 404.5, 431, 457.5 }
+local INV_YS = {
+    164.74285888672,
+    195.24285888672,
+    225.74285888672,
+    256.24285888672,
+    286.74285888672,
+    317.24285888672,
 }
-function wz.clip(s, n)
-    s = tostring(s or ''):gsub('[\r\n]+', ' | '):gsub('%z', '')
-    n = n or 1000
-    if #s > n then return s:sub(1, n) .. '...[' .. #s .. 'b]' end
-    return s
-end
-function wz.ensure()
-    if wz.path then return end
-    local root = ''
-    pcall(function() root = getWorkingDirectory() or '' end)
-    if root == '' then
-        pcall(function()
-            local p = thisScript().path or ''
-            root = p:match('^(.*\\)') or ''
-        end)
+local INV_GRID = {}
+for row = 0, 5 do
+    for col = 0, 5 do
+        INV_GRID[INV_XS[col + 1] .. ', ' .. INV_YS[row + 1]] = row * 6 + col
     end
-    local dir = (root .. '\\config\\autozatochka'):gsub('\\\\+', '\\')
-    if not doesDirectoryExist(dir) then createDirectory(dir) end
-    wz.path = dir .. '\\workshop.log'
 end
-function wz.write(tag, msg)
-    if not wz.enabled then return end
-    pcall(function()
-        wz.ensure()
-        wz.n = (wz.n or 0) + 1
-        if wz.n % 40 == 1 then
-            local fh = io.open(wz.path, 'rb')
-            if fh then
-                local sz = fh:seek('end')
-                fh:close()
-                if sz and sz > 1800000 then
-                    pcall(os.remove, wz.path .. '.old')
-                    pcall(os.rename, wz.path, wz.path .. '.old')
+-- Панель инвентаря карт справа; левее — слоты верстака (не кликать как «взять карту»)
+local CARD_INV_MIN_X = 310
+
+function ws.slotFromTd(x, y)
+    x, y = tonumber(x), tonumber(y)
+    if not x or not y then return nil end
+    local hit = INV_GRID[x .. ', ' .. y]
+    if hit ~= nil then return hit end
+    for row = 0, 5 do
+        if math.abs(INV_YS[row + 1] - y) < 0.05 then
+            for col = 0, 5 do
+                if math.abs(INV_XS[col + 1] - x) < 0.05 then
+                    return row * 6 + col
                 end
             end
         end
-        local line = os.date('%H:%M:%S') .. ' #' .. wz.n .. ' [' .. tostring(tag) .. '] ' .. wz.clip(msg, 2500) .. '\n'
-        local f = io.open(wz.path, 'a+')
-        if not f then return end
-        f:write(line)
-        f:close()
-    end)
+    end
+    return nil
 end
-function wz.hot(s)
-    if type(s) ~= 'string' or s == '' then return false end
-    local l = s:lower()
-    if l:find('enchant', 1, true) or l:find('workshop', 1, true) or l:find('1187', 1, true) then return true end
-    if l:find('moveitem', 1, true) or l:find('clickon', 1, true) or l:find('startenchant', 1, true) then return true end
-    if l:find('rightclick', 1, true) or l:find('leftclick', 1, true) then return true end
-    if l:find('startcraft', 1, true) or l:find('resourceNeed', 1, true) then return true end
-    if l:find('updatecategory', 1, true) or l:find('10253', 1, true) or l:find('guncontext', 1, true) then return true end
-    if s:find(wz.needleZ, 1, true) or s:find(wz.needleW, 1, true) or s:find(wz.needleS, 1, true) then return true end
+
+local function nearPos(x, y, tx, ty, tol)
+    x, y = tonumber(x), tonumber(y)
+    if not x or not y then return false end
+    tol = tol or 3
+    return math.abs(x - tx) <= tol and math.abs(y - ty) <= tol
+end
+
+function ws.noteTd(id, td)
+    if type(td) ~= 'table' then return end
+    local pos = td.position or td
+    local x = pos.x or td.x
+    local y = pos.y or td.y
+    local text = tostring(td.text or '')
+    if text == 'INVENTORY' or text == '\x85H\x8BEH\x8FAP\x92' then
+        ws.invTd = {}
+        ws.cefInv = false
+    elseif text == 'CLOSE' or text == '\x88AKP\x91\x8F\x92' then
+        ws.invTd = {}
+    end
+    local slot = ws.slotFromTd(x, y)
+    if slot ~= nil then
+        ws.invTd[slot] = id
+    end
+    pcall(ws.noteCardTd, id, td, x, y, text)
+end
+
+-- Эликсир мастер: слоты верстака + карты из инвентаря справа (x>=310)
+function ws.noteCardTd(id, td, x, y, text)
+    id = tonumber(id) or -1
+    x, y = tonumber(x), tonumber(y)
+    if not x or not y or id < 0 then return end
+    local model = tonumber(td.modelId or td.model or td.modelID) or 0
+    local sel = td.selectable
+    if sel == nil then sel = td.selectAble end
+    if sel == true then sel = 1 elseif sel == false then sel = 0 else sel = tonumber(sel) or 0 end
+    local c = ws.card
+
+    if nearPos(x, y, 168.03, 182.28, 4) then
+        c.leftTd = id
+        c.leftFilled = (model == 19168)
+        c.open = true
+        c.seenAt = os.clock()
+    elseif nearPos(x, y, 261.37, 193.28, 4) then
+        c.rightTd = id
+        c.rightFilled = (model == 19168)
+        c.open = true
+        c.seenAt = os.clock()
+    elseif nearPos(x, y, 185.66, 258.65, 4) then
+        c.improveTd = id
+        c.improveReady = (sel == 1)
+        c.open = true
+        c.seenAt = os.clock()
+    elseif nearPos(x, y, 163.26, 245.38, 4) then
+        c.open = true
+        c.seenAt = os.clock()
+    end
+
+    -- Инвентарь карт только справа
+    if x >= CARD_INV_MIN_X and model == 19168 then
+        local invSlot = ws.slotFromTd(x, y)
+        if invSlot == nil then
+            invSlot = 'p:' .. tostring(math.floor(x * 10)) .. ':' .. tostring(math.floor(y * 10))
+        end
+        local prev = c.inv[invSlot] or {}
+        c.inv[invSlot] = {
+            id = id,
+            level = tonumber(prev.level) or -1,
+            sel = sel,
+            x = x,
+            at = os.clock(),
+        }
+        c.open = true
+        c.seenAt = os.clock()
+    elseif x >= CARD_INV_MIN_X and (model == 1649 or model == 0) then
+        local invSlot = ws.slotFromTd(x, y)
+        if invSlot and c.inv[invSlot] then c.inv[invSlot] = nil end
+    end
+
+    local lvl = tonumber(text:match('LEVEL:(%d+)')) or tonumber(text:match('~w~~n~LEVEL:(%d+)'))
+    if lvl and x >= CARD_INV_MIN_X then
+        local bestSlot, bestD = nil, 1e9
+        for col = 1, 6 do
+            for row = 1, 6 do
+                local sx, sy = INV_XS[col], INV_YS[row]
+                local dx, dy = x - sx, y - sy
+                if dx > -5 and dx < 40 and dy > -5 and dy < 30 then
+                    local d = dx * dx + dy * dy
+                    if d < bestD then
+                        bestD = d
+                        bestSlot = (row - 1) * 6 + (col - 1)
+                    end
+                end
+            end
+        end
+        if bestSlot ~= nil then
+            local prev = c.inv[bestSlot] or {}
+            if (tonumber(prev.id) or -1) >= 0 then
+                prev.level = lvl
+                prev.at = os.clock()
+                c.inv[bestSlot] = prev
+            end
+        end
+    elseif lvl and c.leftFilled and nearPos(x, y, 168.03, 182.28, 50) then
+        ws.itemEnchant = lvl
+    end
+
+    if c.open and not ws.busy and not c.waitingChat and (os.clock() - (tonumber(c.seenAt) or 0)) > 15 then
+        c.open = false
+    end
+end
+
+function ws.isCard()
+    return tonumber(ws.tab) == 5
+end
+
+function ws.cardCount(maxLvl)
+    maxLvl = tonumber(maxLvl) or 99
+    local n = 0
+    for _, info in pairs(ws.card.inv or {}) do
+        local lv = tonumber(info.level)
+        if lv == nil or lv < 0 then lv = 0 end
+        local sel = tonumber(info.sel) or 0
+        local tid = tonumber(info.id) or -1
+        local ix = tonumber(info.x) or 0
+        if tid >= 0 and sel == 1 and ix >= CARD_INV_MIN_X and lv < maxLvl then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+function ws.pickInvCard(target)
+    target = tonumber(target) or 0
+    if target > 3 then target = 3 end
+    local list = {}
+    local c = ws.card
+    local ban = {
+        [tonumber(c.leftTd) or -3] = true,
+        [tonumber(c.rightTd) or -3] = true,
+        [tonumber(c.improveTd) or -3] = true,
+    }
+    for slot, info in pairs(c.inv or {}) do
+        local lv = tonumber(info.level)
+        if lv == nil or lv < 0 then lv = 0 end
+        local sel = tonumber(info.sel) or 0
+        local tid = tonumber(info.id) or -1
+        local ix = tonumber(info.x) or 0
+        if tid >= 0 and sel == 1 and ix >= CARD_INV_MIN_X and not ban[tid] and (target <= 0 or lv < target) then
+            list[#list + 1] = { slot = slot, id = tid, level = lv }
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.level ~= b.level then return a.level > b.level end
+        return tostring(a.slot) < tostring(b.slot)
+    end)
+    -- две одного уровня
+    for i = 1, #list do
+        for j = i + 1, #list do
+            if list[i].level == list[j].level then
+                return list[i], list[j]
+            end
+        end
+    end
+    return list[1], list[2]
+end
+
+function ws.clickTd(id)
+    id = tonumber(id) or -1
+    if id < 0 or type(sampSendClickTextdraw) ~= 'function' then return false end
+    local now = os.clock()
+    if (now - (tonumber(ws.card.lastClickAt) or 0)) < 0.4 then return false end
+    ws.card.lastClickAt = now
+    ws.card.seenAt = now
+    sampSendClickTextdraw(id)
+    return true
+end
+
+function ws.cardReady()
+    local c = ws.card
+    if c.waitingChat or ws.busy then return false end
+    -- rightFilled не доверяем (фантом на правом слоте) — только 2 клика из инвентаря + Улучшить
+    return c.open
+        and (tonumber(c.placed) or 0) >= 2
+        and c.improveReady
+        and (tonumber(c.improveTd) or -1) >= 0
+end
+
+-- Всегда 2 карты из инвентаря заново (правый слот верстака часто фантомный)
+function ws.placeCards()
+    local c = ws.card
+    if not c.open or c.waitingChat or ws.busy then return false end
+    if ws.cardReady() then return true end
+    local target = tonumber(max_toch) or 0
+    if target > 3 then target = 3 end
+    local placed = tonumber(c.placed) or 0
+    if placed >= 2 then
+        ws.lowMatSaid = false
+        return c.improveReady
+    end
+    local a, b = ws.pickInvCard(target)
+    if not a then
+        if not ws.lowMatSaid then
+            ws.lowMatSaid = true
+            sampAddChatMessage(u8:decode('[AutoZatochka] Нужны 2 карты в инвентаре справа'), 0xFF3333)
+        end
+        return false
+    end
+    local pick = a
+    if placed == 1 then
+        pick = b
+        if not pick then
+            a, b = ws.pickInvCard(target)
+            pick = a
+        end
+        if not pick then
+            if not ws.lowMatSaid then
+                ws.lowMatSaid = true
+                sampAddChatMessage(u8:decode('[AutoZatochka] Нужна ещё 1 карта в инвентаре'), 0xFF3333)
+            end
+            return false
+        end
+    end
+    if ws.clickTd(pick.id) then
+        if c.inv[pick.slot] then c.inv[pick.slot].sel = 0 end
+        c.placed = placed + 1
+        c.step = (c.placed == 1) and 'waitLeft' or 'waitRight'
+    end
     return false
 end
-function wz.state()
-    return 'status=' .. tostring(status)
-        .. ' tochi=' .. tostring(tochi)
-        .. ' ws=' .. tostring(workshop_check)
-        .. ' max=' .. tostring(max_toch)
-        .. ' av=' .. tostring(ws.available)
-        .. ' chance=' .. tostring(ws.chance)
-        .. ' busy=' .. tostring(ws.busy)
-        .. ' ench=' .. tostring(ws.itemEnchant)
-        .. ' item=' .. tostring(ws.itemId)
-        .. ' idx=' .. tostring(enchantSlotsData.index)
-        .. ' left=' .. tostring(enchantSlotsData.left)
-        .. ' right=' .. tostring(enchantSlotsData.right)
-        .. ' color=' .. tostring(enchantSlotsData.color)
-        .. ' stoneSlot=' .. tostring(ws.stoneSlot)
-        .. ' stoneN=' .. tostring(ws.stoneAmount)
-        .. ' tab=' .. tostring(ws.tab)
-        .. ' res=' .. tostring(ws.resSlot)
-        .. ' resN=' .. tostring(ws.resAmount)
-        .. ' needL=' .. tostring(ws.leftNeed)
-        .. ' needR=' .. tostring(ws.rightNeed)
+
+function ws.startCardEnchant()
+    local c = ws.card
+    if not ws.cardReady() then return false end
+    if not ws.clickTd(c.improveTd) then return false end
+    c.step = 'busy'
+    c.placed = 0
+    ws.busy = true
+    ws.busyAt = os.clock()
+    c.waitingChat = true
+    return true
 end
-function wz.eventOf(str)
+
+function ws.clickOnBlock(slot, typ)
+    slot = tonumber(slot) or -1
+    if slot < 0 then return end
+    sendCEF(string.format('clickOnBlock|{"slot": %d, "type": %d}', slot, typ or 1))
+end
+
+local function itemsFromInventory(data)
+    if type(data) ~= 'table' then return nil end
+    local items
+    if type(data[1]) == 'table' and type(data[1].data) == 'table' then
+        items = data[1].data.items
+    elseif type(data.data) == 'table' then
+        items = data.data.items
+    else
+        items = data.items
+    end
+    if type(items) ~= 'table' then return nil end
+    if items[1] ~= nil then return items end
+    local list = {}
+    for _, item in pairs(items) do
+        if type(item) == 'table' then
+            list[#list + 1] = item
+        end
+    end
+    return list
+end
+
+function parsePlayerInventory(str)
+    if type(str) ~= 'string' or not str:find('playerInventory', 1, true) then return end
+    local payload = str:match("window%.executeEvent%(%s*'[^']+'%s*,%s*`([^`]+)`")
+        or str:match('playerInventory|(.*)')
+    if not payload or not decodeJson then return end
+    -- action 2 — полный снимок; другие action тоже могут нести слоты с 1420/1187
+    local ok, data = pcall(decodeJson, payload)
+    if not ok then return end
+    local items = itemsFromInventory(data)
+    if not items then return end
+    ws.cefInv = true
+    ws.ingestItems(items, 1)
+end
+
+local sendQ = {}
+local function eventOf(str)
     local ev, payload = str:match("window%.executeEvent%(%s*'([^']+)'%s*,%s*`([^`]*)`")
     if ev then return ev, payload end
     return str:match("window%.executeEvent%(%s*'([^']+)'%s*,%s*'([^']*)'")
 end
-function wz.queueSend(s)
+local function queueSend(s)
     if type(s) ~= 'string' or s == '' then return end
-    wz.outQ = wz.outQ or {}
-    wz.outQ[#wz.outQ + 1] = s .. ''
-    if #wz.outQ > 80 then table.remove(wz.outQ, 1) end
+    sendQ[#sendQ + 1] = s .. ''
+    if #sendQ > 80 then table.remove(sendQ, 1) end
 end
-function wz.pumpOut()
-    local q = wz.outQ
-    if not q or #q == 0 then return end
-    wz.outQ = {}
+local function pumpSend()
+    if #sendQ == 0 then return end
+    local q = sendQ
+    sendQ = {}
     for i = 1, #q do
-        local s = q[i]
-        pcall(ws.handleSend, s)
-        if s == wz.lastSendLine then
-            wz.lastSendN = (wz.lastSendN or 1) + 1
-        else
-            if (wz.lastSendN or 0) > 1 then
-                wz.write('SEND', 'repeat x' .. tostring(wz.lastSendN))
-            end
-            wz.write('SEND', s)
-            wz.lastSendLine = s
-            wz.lastSendN = 1
-        end
+        pcall(ws.handleSend, q[i])
     end
-end
-function wz.flushState()
-    local s = wz.state()
-    if s ~= wz.lastState then
-        wz.lastState = s
-        wz.write('STATE', s)
-    end
-end
-function wz.cef(str)
-    if type(str) ~= 'string' or str == '' then return end
-    local cmd = str:match('^([^|]+)') or 'cef'
-    local hot = wz.hot(str)
-    if not hot and not workshop_check and not status then
-        wz.miss[cmd] = (wz.miss[cmd] or 0) + 1
-        return
-    end
-    wz.write('CEF', str)
-end
-function wz.askDump()
-    local now = os.clock()
-    if wz.lastDump and (now - wz.lastDump) < 8 then return end
-    wz.needDump = true
 end
 
 -- ID точильного камня: [1187] = "Точильный камень"
 local Whetstone_ITEM_ID = 1187
 local GUN_STONE_ID = 10253
 local GUN_RES_ID = 511
+local ATTACH_STONE_ID = 8701
+local ATTACH_RES_ID = 1187
+local DILL_ID = 510
+local ARMOR_STONE_ID = 5736
+local AMULET_ID = 1420
 
 local function soundFileLooksBad(path)
     if not doesFileExist(path) then return true end
@@ -631,12 +717,17 @@ local function initSuccessSound()
     if downloadToFileMirrors(mirrorUrlsFor('applepay.mp3'), path, 45) and not soundFileLooksBad(path) then
         tryLoadStream()
     else
-        if doesFileExist(path) then pcall(os.remove, path) end
-        print('[AutoZatochka] ' .. u8:decode('Не удалось скачать звук (пробовали CDN и GitHub).'))
+        if doesFileExist(path) then
+            pcall(os.remove, path)
+        end
     end
 end
 
 -- Воспроизведение звука успешной заточки
+local wantSound = false
+local function queueSuccessSound()
+    wantSound = true
+end
 local function playSuccessSound()
     if not playSound[0] then return end
     local path = getWorkingDirectory() .. '\\' .. SOUND_SUBDIR .. '\\' .. SOUND_FILENAME
@@ -658,10 +749,17 @@ end
 
 -- Склонение для статистики: "N попытка" / "N попытки" / "N попыток" (должна быть выше imgui.OnFrame)
 local function attemptsWord(n)
-    n = tonumber(n) or 0
-    if n == 1 then return "1 попытка"
-    elseif n >= 2 and n <= 4 then return n .. " попытки"
-    else return n .. " попыток" end
+    n = math.floor(tonumber(n) or 0)
+    if n < 0 then n = 0 end
+    local n10 = n % 10
+    local n100 = n % 100
+    if n10 == 1 and n100 ~= 11 then
+        return tostring(n) .. " попытка"
+    end
+    if n10 >= 2 and n10 <= 4 and (n100 < 12 or n100 > 14) then
+        return tostring(n) .. " попытки"
+    end
+    return tostring(n) .. " попыток"
 end
 
 -- == CEF функции == --
@@ -690,19 +788,8 @@ function evalcef(code, encoded)
     raknetDeleteBitStream(bs)
 end
 
--- Чтение значения из CEF (работает, если arizona.eval возвращает результат)
-local function evalcefReturn(code)
-    if arizona and arizona.eval then
-        local ok, result = pcall(arizona.eval, code, 0)
-        if ok then return result end
-    end
-    evalcef(code, 0)
-    return nil
-end
-
 -- == Функции отправки CEF команд == --
 function sendCEF(str)
-    wz.write('OUT', str)
     if arizona and arizona.send then
         local ok = pcall(arizona.send, 'onArizonaSend', { text = str, server_id = 0 })
         if ok then return end
@@ -715,465 +802,6 @@ function sendCEF(str)
     raknetBitStreamWriteInt32(bs, 0)
     raknetSendBitStream(bs)
     raknetDeleteBitStream(bs)
-end
-
--- == Функции работы с CEF == --
-function rightClickOnBlock(slot, type)
-    -- Отправляем событие rightClickOnBlock (как в пакете: rightClickOnBlock|{"slot": 29, "type": 1})
-    local json = string.format('{"slot": %d, "type": %d}', slot, type or 1)
-    sendCEF('rightClickOnBlock|'..json)
-end
-
-function leftClickOnBlock(slot, type)
-    local json = string.format('{"slot": %d, "type": %d}', slot, type or 1)
-    sendCEF('leftClickOnBlock|'..json)
-end
-
--- Как в ArzMarket: клик по слоту (выбор/перенос предмета)
-function clickOnBlock(slot, type)
-    local json = string.format('{"slot": %d, "type": %d}', slot, type or 1)
-    sendCEF('clickOnBlock|'..json)
-end
-
-function clickOnButton(type, slot, action)
-    -- Отправляем событие clickOnButton (как в пакете: clickOnButton|{"type": 1,"slot": 29, "action": 16})
-    local json = string.format('{"type": %d, "slot": %d, "action": %d}', type or 1, slot, action or 16)
-    sendCEF('clickOnButton|'..json)
-end
-
-function moveItem(fromSlot, fromType, toSlot, toType, amount)
-    -- Отправляем событие inventory.moveItem (как в пакете: inventory.moveItem|{"from":{"slot":40,"type":1,"amount":15},"to":{"slot":29,"type":1}})
-    amount = amount or 1
-    fromType = fromType or 1
-    toType = toType or 1
-    local json = string.format('{"from":{"slot":%d,"type":%d,"amount":%d},"to":{"slot":%d,"type":%d}}', fromSlot, fromType, amount, toSlot, toType)
-    sendCEF('inventory.moveItem|'..json)
-end
-
-local Whetstone_KEYWORDS = { "Точильный камень", "точильный камень", "Заточка", "заточка" }
-
-function findStoneSlotNumber()
-    local kwEsc = (Whetstone_KEYWORDS[1]):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\r", ""):gsub("\n", "\\n")
-    evalanon(string.format([[
-        try {
-            var stoneSlotNumber = -1;
-            var keywords = ["%s", "Заточка", "заточка"];
-            var containerSelectors = ['.inventory-main__grid', '.inventory-grid__grid', '.warehouse .inventory-grid__grid', '[class*="inventory-grid"]', '[class*="inventory-main"]', '.inventory-container', '[class*="inventory"]'];
-            for (var cs = 0; cs < containerSelectors.length; cs++) {
-                var containers = document.querySelectorAll(containerSelectors[cs]);
-                for (var c = 0; c < containers.length; c++) {
-                    var items = containers[c].querySelectorAll('.inventory-item-hoc, .inventory-grid__item-bg, [class*="item"]');
-                    for (var i = 0; i < items.length; i++) {
-                        var item = items[i];
-                        var img = item.querySelector('.inventory-item__image, img');
-                        if (!img) continue;
-                        var alt = img.getAttribute('alt') || '';
-                        var src = img.getAttribute('src') || '';
-                        var text = (item.innerText || item.textContent || '').toString();
-                        var combined = alt + ' ' + text;
-                        var m = alt.match(/\d+/); var m2 = src.match(/\d+/);
-                        var id = parseInt(m ? m[0] : 0) || parseInt(m2 ? m2[0] : 0) || 0;
-                        var byName = false;
-                        for (var k = 0; k < keywords.length; k++) { if (combined.indexOf(keywords[k]) !== -1) { byName = true; break; } }
-                        if (id !== 1187 && !byName) continue;
-                        var slotNum = -1;
-                        var slotAttr = item.getAttribute('data-slot');
-                        if (slotAttr) slotNum = parseInt(slotAttr);
-                        if (slotNum < 0) { var p = item.closest('[data-slot]'); if (p) slotNum = parseInt(p.getAttribute('data-slot')); }
-                        if (slotNum < 0) { var ia = item.getAttribute('data-index'); if (ia) slotNum = parseInt(ia); }
-                        if (slotNum < 0) { var s2 = item.getAttribute('slot'); if (s2) slotNum = parseInt(s2); }
-                        if (slotNum < 0) slotNum = i;
-                        if (slotNum >= 0) { window.stoneSlotNumber = slotNum; return slotNum; }
-                    }
-                }
-            }
-            return -1;
-        } catch(e) { return -1; }
-    ]], kwEsc))
-    wait(150)
-    local slotNum = evalcefReturn('return (typeof window.stoneSlotNumber !== "undefined" && window.stoneSlotNumber >= 0) ? window.stoneSlotNumber : -1;')
-    local n = (type(slotNum) == 'number' and slotNum >= 0) and slotNum or (tonumber(slotNum) or -1)
-    wz.write('SLOT', 'stone=' .. tostring(n) .. ' raw=' .. tostring(slotNum))
-    return n
-end
-
-function findEnchantSlotNumber()
-    evalanon([[
-        try {
-            // Ищем левый слот заточки (пустой слот, куда нужно положить камень)
-            const leftSlotSelectors = [
-                '[class*="left-slot"]',
-                '[class*="leftSlot"]',
-                '[class*="left_slot"]',
-                '[data-slot="left"]',
-                '[data-slot-type="left"]',
-                '[class*="enchant-slot"]:first-child',
-                '[class*="enchantSlot"]:first-child',
-                '.enchant-main__slot-item:first-child',
-                '[class*="enchant-slot"]',
-                '[class*="enchantSlot"]'
-            ];
-            let enchantSlotNumber = -1;
-            
-            for (let selector of leftSlotSelectors) {
-                const slots = document.querySelectorAll(selector);
-                for (let slot of slots) {
-                    const rect = slot.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                        // Проверяем, что слот пустой
-                        const hasItem = slot.querySelector('.inventory-item-hoc, .inventory-item__image, img[alt*="1187"]');
-                        if (!hasItem) {
-                            // Пытаемся определить номер слота
-                            let slotNum = -1;
-                            
-                            // Метод 1: data-slot атрибут
-                            const slotAttr = slot.getAttribute('data-slot');
-                            if (slotAttr && slotAttr !== 'left') {
-                                slotNum = parseInt(slotAttr);
-                            }
-                            
-                            // Метод 2: data-index
-                            if (slotNum < 0) {
-                                const indexAttr = slot.getAttribute('data-index');
-                                if (indexAttr) {
-                                    slotNum = parseInt(indexAttr);
-                                }
-                            }
-                            
-                            // Метод 3: Используем индекс из enchantSlotsData.index (если есть)
-                            if (slotNum < 0 && window.enchantSlotIndex !== undefined) {
-                                slotNum = window.enchantSlotIndex;
-                            }
-                            
-                            if (slotNum >= 0) {
-                                enchantSlotNumber = slotNum;
-                                window.enchantSlotNumber = slotNum;
-                                return slotNum;
-                            }
-                            
-                            // Если не нашли номер, но нашли пустой слот - используем индекс
-                            enchantSlotNumber = 0; // Fallback
-                            window.enchantSlotNumber = 0;
-                            return 0;
-                        }
-                    }
-                }
-                if (enchantSlotNumber >= 0) break;
-            }
-            
-            return enchantSlotNumber;
-        } catch(e) {
-            return -1;
-        }
-    ]])
-    wait(100)
-    local slotNum = evalcefReturn('return window.enchantSlotNumber !== undefined ? window.enchantSlotNumber : -1;')
-    local n = (type(slotNum) == 'number' and slotNum >= 0) and slotNum or (tonumber(slotNum) or -1)
-    wz.write('SLOT', 'enchant=' .. tostring(n) .. ' raw=' .. tostring(slotNum))
-    return n
-end
-
-function findAndClickStone()
-    wz.write('CLICK', 'findAndClickStone ' .. wz.state())
-    local stoneSlotNum = findStoneSlotNumber()
-    wz.write('CLICK', 'findAndClickStone stoneSlot=' .. tostring(stoneSlotNum) .. ' left=' .. tostring(enchantSlotsData.left) .. ' idx=' .. tostring(enchantSlotsData.index))
-    
-    if stoneSlotNum >= 0 then
-        if enchantSlotsData.left == -1 then
-            local enchantSlot = enchantSlotsData.index >= 0 and enchantSlotsData.index or findEnchantSlotNumber()
-            
-            -- 1) Как в ArzMarket: moveItem из слота камня в слот заточки (type 1 = инвентарь)
-            if enchantSlot >= 0 then
-                wz.write('CLICK', 'moveItem stone=' .. tostring(stoneSlotNum) .. ' -> enchant=' .. tostring(enchantSlot))
-                moveItem(stoneSlotNum, 1, enchantSlot, 1, 1)
-                wait(500)
-            end
-            
-            -- 2) Стиль ArzMarket: clickOnBlock — клик по слоту с камнем (взять), потом по слоту заточки (положить)
-            if enchantSlot >= 0 then
-                clickOnBlock(stoneSlotNum, 1)
-                wait(350)
-                clickOnBlock(enchantSlot, 1)
-                wait(400)
-            end
-            
-            local enchantSlotNum = (enchantSlot >= 0) and enchantSlot or findEnchantSlotNumber()
-            if enchantSlotNum >= 0 and enchantSlotNum ~= enchantSlotsData.index then
-                for _, toType in ipairs({1, 2, 3, 4, 5}) do
-                    moveItem(stoneSlotNum, 1, enchantSlotNum, toType, 1)
-                    wait(400)
-                end
-            end
-            
-            -- Метод 3: специальные номера слотов для слота заточки
-            for _, specialSlot in ipairs({-1, -2, -3, 0, 1, 2, 100, 200, 1000, 2000}) do
-                for _, toType in ipairs({1, 2, 3}) do
-                    moveItem(stoneSlotNum, 1, specialSlot, toType, 1)
-                    wait(200)
-                end
-            end
-            
-            -- Fallback: rightClickOnBlock — «взять» камень в руку
-            rightClickOnBlock(stoneSlotNum, 1)
-            wait(800)
-            
-            if enchantSlotsData.index >= 0 then
-                for _, toType in ipairs({1, 2, 3, 4, 5}) do
-                    moveItem(stoneSlotNum, 1, enchantSlotsData.index, toType, 1)
-                    wait(400)
-                end
-            end
-            if enchantSlotNum >= 0 and enchantSlotNum ~= enchantSlotsData.index then
-                for _, toType in ipairs({1, 2, 3, 4, 5}) do
-                    moveItem(stoneSlotNum, 1, enchantSlotNum, toType, 1)
-                    wait(400)
-                end
-            end
-            
-            -- Метод 3.5: moveItem без rightClickOnBlock
-            if enchantSlotsData.index >= 0 then
-                moveItem(stoneSlotNum, 1, enchantSlotsData.index, 1, 1)
-                wait(600)
-            end
-            
-            -- Метод 4: Fallback - используем leftClickOnBlock (на случай если moveItem не работает)
-            if enchantSlotsData.index >= 0 then
-                leftClickOnBlock(enchantSlotsData.index, 1)
-                wait(400)
-            end
-            if enchantSlotNum >= 0 and enchantSlotNum ~= enchantSlotsData.index then
-                leftClickOnBlock(enchantSlotNum, 1)
-                wait(400)
-            end
-            
-            -- Метод 5: Пробуем использовать clickOnButton с action: 16
-            if enchantSlotsData.index >= 0 then
-                clickOnButton(1, enchantSlotsData.index, 16)
-                wait(400)
-            end
-            
-            -- Метод 6: Кликаем через JavaScript (самый надежный метод)
-            -- Это должно сработать, если камень "в руке" после rightClickOnBlock
-            evalanon([[
-                try {
-                    // Ищем левый слот заточки (пустой слот) - более агрессивный поиск
-                    const leftSlotSelectors = [
-                        '[class*="left-slot"]',
-                        '[class*="leftSlot"]',
-                        '[class*="left_slot"]',
-                        '[data-slot="left"]',
-                        '[data-slot-type="left"]',
-                        '[class*="enchant-slot"]:first-child',
-                        '[class*="enchantSlot"]:first-child',
-                        '.enchant-main__slot-item:first-child',
-                        '[class*="enchant-slot"]',
-                        '[class*="enchantSlot"]',
-                        '[class*="slot"][class*="enchant"]',
-                        '[data-slot-type="enchant"]'
-                    ];
-                    
-                    let foundSlot = null;
-                    
-                    for (let selector of leftSlotSelectors) {
-                        const slots = document.querySelectorAll(selector);
-                        for (let slot of slots) {
-                            const rect = slot.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {
-                                // Проверяем, что слот пустой
-                                const hasItem = slot.querySelector('.inventory-item-hoc, .inventory-item__image, img[alt*="1187"]');
-                                if (!hasItem) {
-                                    // Дополнительная проверка: слот должен быть в области заточки
-                                    const parent = slot.closest('[class*="enchant"], [class*="workshop"], [class*="верстак"]');
-                                    if (parent || selector.includes('enchant') || selector.includes('slot')) {
-                                        foundSlot = slot;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if (foundSlot) break;
-                    }
-                    
-                    if (foundSlot) {
-                        const rect = foundSlot.getBoundingClientRect();
-                        const centerX = rect.left + rect.width / 2;
-                        const centerY = rect.top + rect.height / 2;
-                        
-                        // Метод 6.1: Прямой клик (самый простой) - ПРИОРИТЕТ
-                        if (typeof foundSlot.click === 'function') {
-                            foundSlot.click();
-                        }
-                        
-                        // Метод 6.2: Полная последовательность событий мыши для левого клика
-                        const mousedown = new MouseEvent('mousedown', {
-                            bubbles: true,
-                            cancelable: true,
-                            button: 0,
-                            clientX: centerX,
-                            clientY: centerY,
-                            view: window
-                        });
-                        foundSlot.dispatchEvent(mousedown);
-                        
-                        setTimeout(() => {
-                            const mouseup = new MouseEvent('mouseup', {
-                                bubbles: true,
-                                cancelable: true,
-                                button: 0,
-                                clientX: centerX,
-                                clientY: centerY,
-                                view: window
-                            });
-                            foundSlot.dispatchEvent(mouseup);
-                            
-                            setTimeout(() => {
-                                const clickEvent = new MouseEvent('click', {
-                                    bubbles: true,
-                                    cancelable: true,
-                                    button: 0,
-                                    clientX: centerX,
-                                    clientY: centerY,
-                                    view: window
-                                });
-                                foundSlot.dispatchEvent(clickEvent);
-                                
-                                // Повторный клик для надежности
-                                if (typeof foundSlot.click === 'function') {
-                                    foundSlot.click();
-                                }
-                            }, 50);
-                        }, 50);
-                        
-                        // Метод 6.3: Drag & Drop события (если камень "в руке" после rightClickOnBlock)
-                        setTimeout(() => {
-                            const dragOver = new DragEvent('dragover', {
-                                bubbles: true,
-                                cancelable: true,
-                                clientX: centerX,
-                                clientY: centerY,
-                                view: window,
-                                dataTransfer: new DataTransfer()
-                            });
-                            foundSlot.dispatchEvent(dragOver);
-                            
-                            setTimeout(() => {
-                                const drop = new DragEvent('drop', {
-                                    bubbles: true,
-                                    cancelable: true,
-                                    clientX: centerX,
-                                    clientY: centerY,
-                                    view: window,
-                                    dataTransfer: new DataTransfer()
-                                });
-                                foundSlot.dispatchEvent(drop);
-                            }, 50);
-                        }, 200);
-                        
-                        return true;
-                    }
-                } catch(e) {
-                    console.error('Error clicking enchant slot:', e);
-                }
-                return false;
-            ]])
-            wait(1000)
-        end
-        return true
-    else
-        -- Fallback: ищем камень через обычный поиск и кликаем напрямую
-        evalanon([[
-            try {
-                const containers = document.querySelectorAll('.inventory-main__grid, .inventory-grid__grid, .warehouse .inventory-grid__grid, [class*="inventory-grid"]');
-                let stoneItem = null;
-                
-                containers.forEach((container) => {
-                    const items = container.querySelectorAll('.inventory-item-hoc, .inventory-grid__item-bg');
-                    items.forEach((item) => {
-                        const img = item.querySelector('.inventory-item__image, img');
-                        if (img) {
-                            const alt = img.getAttribute('alt') || '';
-                            const itemId = parseInt(alt.match(/\d+/)?.[0]) || 0;
-                            if (itemId === 1187) {
-                                stoneItem = item;
-                                return;
-                            }
-                        }
-                    });
-                    if (stoneItem) return;
-                });
-                
-                if (stoneItem) {
-                    stoneItem.click();
-                    return true;
-                }
-            } catch(e) {}
-            return false;
-        ]])
-    end
-    return false
-end
-
-function findAndClickEnchantButton()
-    evalanon([[
-        try {
-            const buttonTexts = ['ENCHANT', 'ЗАТОЧКА', 'Заточить', 'Улучшить', 'ENHANCE', 'Заточка', 'заточка', 'ЗАТОЧИТЬ', 'START', 'НАЧАТЬ', 'ПРОДОЛЖИТЬ', 'УЛУЧШИТЬ'];
-            const selectors = [
-                '.enchant-main__button',
-                '.enchant-main__start',
-                '[class*="enchant"][class*="button"]',
-                '[class*="enchant"][class*="start"]',
-                '[class*="workshop"] button',
-                'button',
-                '[role="button"]',
-                '.btn',
-                '[class*="button"]',
-                '[class*="btn"]',
-                '[class*="enchant"]',
-                '[class*="ENCHANT"]',
-                '[class*="start"]',
-                '[class*="START"]',
-                'div[onclick]',
-                'a[onclick]',
-                '*[onclick]'
-            ];
-            
-            for (let selector of selectors) {
-                try {
-                    const buttons = document.querySelectorAll(selector);
-                    for (let btn of buttons) {
-                        try {
-                            const rect = btn.getBoundingClientRect();
-                            if (rect.width === 0 || rect.height === 0) continue;
-                            const text = (btn.textContent || btn.innerText || '').toUpperCase();
-                            const className = (btn.className || '').toUpperCase();
-                            const id = (btn.id || '').toUpperCase();
-                            const onclick = (btn.getAttribute('onclick') || '').toUpperCase();
-                            
-                            for (let searchText of buttonTexts) {
-                                if (text.includes(searchText.toUpperCase()) || 
-                                    className.includes(searchText.toUpperCase()) ||
-                                    id.includes(searchText.toUpperCase()) ||
-                                    onclick.includes(searchText.toUpperCase())) {
-                                    // Двойной клик для надежности
-                                    const clickEvent1 = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 });
-                                    btn.dispatchEvent(clickEvent1);
-                                    const clickEvent2 = new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 });
-                                    btn.dispatchEvent(clickEvent2);
-                                    const clickEvent3 = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
-                                    btn.dispatchEvent(clickEvent3);
-                                    if (typeof btn.click === 'function') {
-                                        btn.click();
-                                    }
-                                    return true;
-                                }
-                            }
-                        } catch(e) {}
-                    }
-                } catch(e) {}
-            }
-        } catch(e) {}
-        return false;
-    ]])
 end
 
 -- == Отправка события startEnchant == --
@@ -1198,80 +826,53 @@ function ws.clickEnchantBtn()
         }
         return 0;
     ]]
-    local val = ws.jsQuery(code, 800)
-    wz.write('CLICK', 'enchant-btn ret=' .. tostring(val))
-    return val
+    return ws.jsQuery(code, 800)
 end
 
 function startEnchant()
-    wz.write('CLICK', 'start av=' .. tostring(ws.available) .. ' chance=' .. tostring(ws.chance)
-        .. ' right=' .. tostring(enchantSlotsData.right) .. ' left=' .. tostring(enchantSlotsData.left))
-    if ws.isGun() then
-        if not ws.loopReady() then
-            wz.write('CLICK', 'startEnchant blocked, gun not ready')
-            return
-        end
-        sendCEF('startEnchant')
+    if ws.isPair() and not ws.loopReady() then
         return
     end
-    local clicked = ws.clickEnchantBtn()
+    ws.clickEnchantBtn()
     sendCEF('startEnchant')
-    if clicked == 0 or clicked == nil or clicked == false then
-        wz.write('CLICK', 'enchant-btn miss, packet sent')
-    end
 end
 
-local function triggerEnchantClick()
-    wz.write('CLICK', 'triggerEnchantClick ' .. wz.state())
-    startEnchant()
-end
-
-function click_onStone()
-    ws.placeStone()
-end
-
--- Разбор updateEnchantSlots: JSON через decodeJson, иначе regex
+-- Разбор updateEnchantSlots: только regex, decodeJson не трогаем
 local function parseEnchantSlotsPayload(jsonData)
     if not jsonData or #jsonData == 0 then return end
-    local prev = (tostring(enchantSlotsData.index) .. '/' .. tostring(enchantSlotsData.left)
-        .. '/' .. tostring(enchantSlotsData.right) .. '/' .. tostring(enchantSlotsData.color))
-    local ok, parsed = safeDecodeJson(jsonData)
-    if ok and type(parsed) == 'table' then
-        if parsed.index ~= nil then enchantSlotsData.index = tonumber(parsed.index) end
-        if parsed.left ~= nil then enchantSlotsData.left = tonumber(parsed.left) end
-        if parsed.right ~= nil then enchantSlotsData.right = tonumber(parsed.right) end
-        if parsed.color ~= nil then enchantSlotsData.color = tonumber(parsed.color) end
-    else
-        local index = jsonData:match('"index":(%-?%d+)')
-        local left = jsonData:match('"left":(%-?%d+)')
-        local right = jsonData:match('"right":(%-?%d+)')
-        local color = jsonData:match('"color":(%-?%d+)')
-        if index then enchantSlotsData.index = tonumber(index) end
-        if left then enchantSlotsData.left = tonumber(left) end
-        if right then enchantSlotsData.right = tonumber(right) end
-        if color then enchantSlotsData.color = tonumber(color) end
+    if jsonData:gsub('^%s+', ''):sub(1, 1) == '[' then return end
+    local index = jsonData:match('"index":(%-?%d+)')
+    local left = jsonData:match('"left":(%-?%d+)')
+    local right = jsonData:match('"right":(%-?%d+)')
+    local color = jsonData:match('"color":(%-?%d+)')
+    if index then
+        local n = tonumber(index)
+        -- Смена предмета в слоте (вставка / снятие) — это не результат заточки.
+        if n ~= enchantSlotsData.index then
+            ws.pendingResult = nil
+            ws.chatHold = nil
+            ws.itemEnchant = -1
+            ws.itemId = -1
+            ws.itemSlot = -1
+            ws.leftItemId = nil
+            ws.rightItemId = -1
+            -- Новый предмет на станке → снова камень, пока не придёт ошибка про амулет.
+            ws.amuletNeed = false
+        end
+        enchantSlotsData.index = n
     end
-    local now = (tostring(enchantSlotsData.index) .. '/' .. tostring(enchantSlotsData.left)
-        .. '/' .. tostring(enchantSlotsData.right) .. '/' .. tostring(enchantSlotsData.color))
-    if now ~= prev then
-        wz.write('SLOTS', 'idx=' .. tostring(enchantSlotsData.index)
-            .. ' left=' .. tostring(enchantSlotsData.left)
-            .. ' right=' .. tostring(enchantSlotsData.right)
-            .. ' color=' .. tostring(enchantSlotsData.color))
-    end
-end
-
-local function onEnchantSlotsUpdate(jsonData)
-    if jsonData then
-        parseEnchantSlotsPayload(jsonData)
-    end
+    if left then enchantSlotsData.left = tonumber(left) end
+    if right then enchantSlotsData.right = tonumber(right) end
+    if color then enchantSlotsData.color = tonumber(color) end
 end
 
 -- Паттерны чата: заточка только по «с +X на +Y»
-local PATTERN_FAIL       = u8:decode("Увы, вам не удалось улучшить предмет .- c %+([0-9]+) на %+([0-9]+)")
-local PATTERN_FAIL_U8    = "Увы, вам не удалось улучшить предмет .- c %+([0-9]+) на %+([0-9]+)"
-local PATTERN_SUCCESS    = u8:decode("Успех! Вам удалось улучшить предмет .- c %+([0-9]+) на %+([0-9]+)")
-local PATTERN_SUCCESS_U8 = "Успех! Вам удалось улучшить предмет .- c %+([0-9]+) на %+([0-9]+)"
+-- Файл UTF-8: u8:decode → CP1251 для матча чата; _U8 — сырой UTF-8
+-- «c»/«с» перед уровнем: берём любой один символ (латиница/кириллица)
+local PATTERN_FAIL       = u8:decode("Увы, вам не удалось улучшить предмет .- %+([0-9]+) на %+([0-9]+)")
+local PATTERN_FAIL_U8    = "Увы, вам не удалось улучшить предмет .- %+([0-9]+) на %+([0-9]+)"
+local PATTERN_SUCCESS    = u8:decode("Успех! Вам удалось улучшить предмет .- %+([0-9]+) на %+([0-9]+)")
+local PATTERN_SUCCESS_U8 = "Успех! Вам удалось улучшить предмет .- %+([0-9]+) на %+([0-9]+)"
 local PATTERN_GUN_FAIL   = u8:decode("не удалось улучшить .- до %+([0-9]+)")
 local PATTERN_GUN_FAIL_U8 = "не удалось улучшить .- до %+([0-9]+)"
 local PATTERN_GUN_OK     = u8:decode("успешно улучшили .- до %+([0-9]+)")
@@ -1305,24 +906,91 @@ function ws.isGun()
     return tonumber(ws.tab) == 1
 end
 
-function ws.stoneId()
-    if ws.isGun() then return GUN_STONE_ID end
-    return Whetstone_ITEM_ID
+function ws.isAttach()
+    return tonumber(ws.tab) == 2
 end
 
-function ws.releaseGunMats()
-    if not ws.isGun() then return end
-    ws.leftOn = false
-    ws.rightOn = false
+function ws.isDill()
+    return tonumber(ws.tab) == 3
+end
+
+function ws.isSkin()
+    return ws.isDill()
+end
+
+function ws.isAcc()
+    return tonumber(ws.tab) == 0
+end
+
+function ws.isArmor()
+    return tonumber(ws.tab) == 4
+end
+
+function ws.isCloth()
+    return ws.isAcc() or ws.isSkin() or ws.isArmor()
+end
+
+function ws.isWeaponTab()
+    return ws.isGun() or ws.isAttach()
+end
+
+function ws.clothNeedsLeft()
+    if not ws.isCloth() then return false end
+    local needL = tonumber(ws.leftNeed) or 0
+    if needL >= 1 then return true end
+    local id = tonumber(ws.leftItemId)
+    -- Амулет/камень — правый ресурс, не левый. Иначе ломается укладка 1420.
+    return id == DILL_ID or id == GUN_RES_ID or id == ARMOR_STONE_ID
+end
+
+-- Скины и аксессуары (не броня, не оружие) — сюда относится точильный амулет.
+function ws.isAmuletTab()
+    return ws.isAcc() or ws.isSkin()
+end
+
+-- Два ресурса: магазин оружия всегда, одежда — когда станок просит левый слот.
+function ws.isPair()
+    if ws.isWeaponTab() then return true end
+    return ws.clothNeedsLeft()
+end
+
+function ws.maxLevel()
+    if ws.isAttach() then return 5 end
+    if ws.isCard() then return 3 end -- карты: максимум +3
+    return 12
+end
+
+-- Только после чата [Информация] Увы/Успех — снова кладём 2 карты из инвентаря
+function ws.afterCardResult(isSuccess, fromLvl, toLvl)
+    local c = ws.card
+    ws.busy = false
+    ws.pendingResult = nil
+    c.waitingChat = false
+    c.placed = 0 -- всегда заново из инвентаря (правый фантом не считаем)
+    c.step = 'idle'
+    c.open = true
+    c.seenAt = os.clock()
+    if isSuccess then
+        if toLvl then ws.itemEnchant = toLvl end
+        queueSuccessSound()
+        ws.statOk(toLvl)
+        local target = tonumber(max_toch) or 0
+        if target > 0 and toLvl and toLvl >= target then
+            max_toch = 0
+            status = false
+            sampAddChatMessage(u8:decode("У вас заточился предмет до указанной вами заточки, выбери другой предмет или другой уровень"), -1)
+            return
+        end
+    else
+        ws.statFail()
+        if fromLvl then ws.itemEnchant = fromLvl end
+    end
 end
 
 function ws.applyFail()
-    tochi = true
     ws.pendingResult = nil
     ws.busy = false
-    ws.releaseGunMats()
     ws.statFail()
-    wz.write('WS', 'fail ' .. wz.state())
 end
 
 function ws.statFail()
@@ -1332,6 +1000,18 @@ function ws.statFail()
     if ws.isGun() then
         ws.gAll = (tonumber(ws.gAll) or 0) + 1
         ws.gLvl = (tonumber(ws.gLvl) or 0) + 1
+    elseif ws.isAttach() then
+        ws.aAll = (tonumber(ws.aAll) or 0) + 1
+        ws.aLvl = (tonumber(ws.aLvl) or 0) + 1
+    elseif ws.isDill() then
+        ws.dAll = (tonumber(ws.dAll) or 0) + 1
+        ws.dLvl = (tonumber(ws.dLvl) or 0) + 1
+    elseif ws.isArmor() then
+        ws.vAll = (tonumber(ws.vAll) or 0) + 1
+        ws.vLvl = (tonumber(ws.vLvl) or 0) + 1
+    elseif ws.isCard() then
+        ws.cAll = (tonumber(ws.cAll) or 0) + 1
+        ws.cLvl = (tonumber(ws.cLvl) or 0) + 1
     else
         all_lost = all_lost + 1
         lost_stone_onLVL = lost_stone_onLVL + 1
@@ -1348,6 +1028,30 @@ function ws.statOk(toLvl)
         ws.gRows = ws.gRows or {}
         table.insert(ws.gRows, { ws.gLvl, toLvl })
         ws.gLvl = 0
+    elseif ws.isAttach() then
+        ws.aLvl = (tonumber(ws.aLvl) or 0) + 1
+        ws.aAll = (tonumber(ws.aAll) or 0) + 1
+        ws.aRows = ws.aRows or {}
+        table.insert(ws.aRows, { ws.aLvl, toLvl })
+        ws.aLvl = 0
+    elseif ws.isDill() then
+        ws.dLvl = (tonumber(ws.dLvl) or 0) + 1
+        ws.dAll = (tonumber(ws.dAll) or 0) + 1
+        ws.dRows = ws.dRows or {}
+        table.insert(ws.dRows, { ws.dLvl, toLvl })
+        ws.dLvl = 0
+    elseif ws.isArmor() then
+        ws.vLvl = (tonumber(ws.vLvl) or 0) + 1
+        ws.vAll = (tonumber(ws.vAll) or 0) + 1
+        ws.vRows = ws.vRows or {}
+        table.insert(ws.vRows, { ws.vLvl, toLvl })
+        ws.vLvl = 0
+    elseif ws.isCard() then
+        ws.cLvl = (tonumber(ws.cLvl) or 0) + 1
+        ws.cAll = (tonumber(ws.cAll) or 0) + 1
+        ws.cRows = ws.cRows or {}
+        table.insert(ws.cRows, { ws.cLvl, toLvl })
+        ws.cLvl = 0
     else
         lost_stone_onLVL = lost_stone_onLVL + 1
         all_lost = all_lost + 1
@@ -1357,21 +1061,15 @@ function ws.statOk(toLvl)
 end
 
 function ws.finishSuccess(fromLvl, toLvl)
-    pcall(playSuccessSound)
+    queueSuccessSound()
     ws.statOk(toLvl)
     ws.pendingResult = nil
     ws.busy = false
-    ws.releaseGunMats()
     local target = tonumber(max_toch) or 0
-    wz.write('WS', 'ok +' .. tostring(fromLvl) .. ' -> +' .. tostring(toLvl) .. ' target=' .. tostring(target))
     if status and target > 0 and toLvl >= target then
-        tochi = false
         max_toch = 0
-        stone_check = false
         status = false
         sampAddChatMessage(u8:decode("У вас заточился предмет до указанной вами заточки, выбери другой предмет или другой уровень"), -1)
-    elseif status then
-        tochi = true
     end
 end
 
@@ -1384,6 +1082,22 @@ function ws.clearStats()
         ws.gRows = {}
         ws.gAll = 0
         ws.gLvl = 0
+    elseif ws.isAttach() then
+        ws.aRows = {}
+        ws.aAll = 0
+        ws.aLvl = 0
+    elseif ws.isDill() then
+        ws.dRows = {}
+        ws.dAll = 0
+        ws.dLvl = 0
+    elseif ws.isArmor() then
+        ws.vRows = {}
+        ws.vAll = 0
+        ws.vLvl = 0
+    elseif ws.isCard() then
+        ws.cRows = {}
+        ws.cAll = 0
+        ws.cLvl = 0
     else
         lost_stone = {}
         all_lost = 0
@@ -1392,19 +1106,16 @@ function ws.clearStats()
 end
 
 function ws.sendCategory()
-    local cat = ws.isGun() and 6 or 0
-    if ws.isGun() and ws.gunCtx then
+    local cat = ws.isWeaponTab() and 6 or 0
+    if ws.isWeaponTab() and ws.gunCtx then
         ws.lastCat = cat
         return
     end
-    local now = os.clock()
     if ws.lastCat == cat then
         return
     end
     ws.lastCat = cat
-    ws.lastCatAt = now
     sendCEF('updateCategory|{"category": ' .. tostring(cat) .. '}')
-    wz.write('CLICK', 'category=' .. tostring(cat))
 end
 
 function ws.setTab(t)
@@ -1413,17 +1124,21 @@ function ws.setTab(t)
     ws.tab = t
     status = false
     max_toch = 0
-    tochi = false
-    stone_check = false
     ws.lastCat = nil
-    ws.leftOn = false
-    ws.rightOn = false
+    ws.leftItemId = nil
+    ws.rightItemId = -1
+    ws.amuletNeed = false
     enchantSlotsData.left = -1
     enchantSlotsData.right = -1
-    ws.bestStone()
-    ws.bestRes()
-    wz.write('UI', t == 1 and 'tab=weapon' or 'tab=cloth')
-    ws.sendCategory()
+    if not ws.isCard() then
+        ws.bestStone()
+        ws.bestRes()
+        ws.sendCategory()
+    else
+        ws.card.step = 'idle'
+        ws.card.inv = {}
+        ws.lowMatSaid = false
+    end
     return true
 end
 
@@ -1436,7 +1151,7 @@ function ws.enoughMats()
     local needR = tonumber(ws.rightNeed) or 1
     if needR < 1 then needR = 1 end
     if (tonumber(ws.stoneAmount) or 0) < needR then return false end
-    if ws.isGun() then
+    if ws.isPair() then
         local needL = tonumber(ws.leftNeed) or 0
         if (tonumber(ws.resAmount) or 0) < needL then return false end
     end
@@ -1448,7 +1163,7 @@ function ws.resourcesReady()
     local right = tonumber(enchantSlotsData.right) or -1
     local idx = tonumber(enchantSlotsData.index) or -1
     if idx < 0 or stone < 0 or right ~= stone then return false end
-    if ws.isGun() then
+    if ws.isPair() then
         local res = tonumber(ws.resSlot) or -1
         local left = tonumber(enchantSlotsData.left) or -1
         if res < 0 or left ~= res then return false end
@@ -1456,17 +1171,85 @@ function ws.resourcesReady()
     return ws.enoughMats()
 end
 
+function ws.mapFor(id)
+    id = tonumber(id)
+    if id == Whetstone_ITEM_ID then return ws.slots1187 end
+    if id == GUN_STONE_ID then return ws.slots10253 end
+    if id == GUN_RES_ID then return ws.slots511 end
+    if id == ATTACH_STONE_ID then return ws.slots8701 end
+    if id == DILL_ID then return ws.slots510 end
+    if id == ARMOR_STONE_ID then return ws.slots5736 end
+    if id == AMULET_ID then return ws.slots1420 end
+    return {}
+end
+
+function ws.resName(id)
+    id = tonumber(id)
+    if id == Whetstone_ITEM_ID then return 'Точильный камень' end
+    if id == GUN_STONE_ID then return 'Заточка на оружие' end
+    if id == GUN_RES_ID then return 'Материалы' end
+    if id == ATTACH_STONE_ID then return 'Заточка обвеса' end
+    if id == DILL_ID then return 'Укроп' end
+    if id == ARMOR_STONE_ID then return 'Заточка бронежилета' end
+    if id == AMULET_ID then return 'Точильный амулет' end
+    return 'Ресурс'
+end
+
+function ws.isResourceId(id)
+    return ws.resName(id) ~= 'Ресурс'
+end
+
+function ws.setSideItem(side, id)
+    id = tonumber(id)
+    if not id or not ws.isResourceId(id) then return end
+    -- Правый ресурс камень/амулет только через чат (amuletNeed). CEF/UI не переключают сами.
+    if side == 'right' then
+        if id == AMULET_ID and not ws.amuletNeed then return end
+        if id == Whetstone_ITEM_ID and ws.amuletNeed then return end
+    end
+    if side == 'left' then
+        if id == tonumber(ws.leftItemId) then return end
+        ws.leftItemId = id
+        enchantSlotsData.left = -1
+    else
+        if id == tonumber(ws.rightItemId) then return end
+        ws.rightItemId = id
+        enchantSlotsData.right = -1
+    end
+end
+
+function ws.pickRightId()
+    if ws.isGun() then return GUN_STONE_ID end
+    if ws.isAttach() then return ATTACH_STONE_ID end
+    if ws.isArmor() then return ARMOR_STONE_ID end
+    -- Одежда/скины: камень по умолчанию; амулет — только после уведомления в чате.
+    if ws.amuletNeed then return AMULET_ID end
+    return Whetstone_ITEM_ID
+end
+
+function ws.pickLeftId()
+    if ws.isAttach() then return Whetstone_ITEM_ID end
+    if ws.isGun() then return GUN_RES_ID end
+    local id = tonumber(ws.leftItemId)
+    if ws.isResourceId(id) then return id end
+    return ws.pickDillLeft()
+end
+
 function ws.bestStone()
-    local map = ws.isGun() and (ws.slots10253 or {}) or (ws.slots1187 or {})
-    local bestSlot, bestAmt = -1, -1
+    local map = ws.mapFor(ws.pickRightId()) or {}
+    local bestSlot, bestAmt, total = -1, -1, 0
     for slot, amt in pairs(map) do
         slot = tonumber(slot) or -1
         amt = tonumber(amt) or 0
-        if slot >= 0 and amt > bestAmt then
-            bestAmt = amt
-            bestSlot = slot
+        if slot >= 0 and amt > 0 then
+            total = total + amt
+            if amt > bestAmt then
+                bestAmt = amt
+                bestSlot = slot
+            end
         end
     end
+    ws.stoneTotal = total
     if bestSlot >= 0 then
         ws.stoneSlot = bestSlot
         ws.stoneAmount = bestAmt
@@ -1477,16 +1260,272 @@ function ws.bestStone()
     return bestSlot, bestAmt
 end
 
-function ws.bestRes()
-    local bestSlot, bestAmt = -1, -1
-    for slot, amt in pairs(ws.slots511 or {}) do
-        slot = tonumber(slot) or -1
-        amt = tonumber(amt) or 0
-        if slot >= 0 and amt > bestAmt then
-            bestAmt = amt
-            bestSlot = slot
+function ws.noteSideId(payload, side)
+    local keys = {
+        '"' .. side .. 'ResourceItem":(%d+)',
+        '"' .. side .. 'ItemId":(%d+)',
+        '"' .. side .. 'Item":(%d+)',
+        '"' .. side .. 'ResourceId":(%d+)',
+        '"' .. side .. 'Resource":(%d+)',
+    }
+    local i
+    for i = 1, #keys do
+        local id = tonumber(payload:match(keys[i]))
+        if ws.isResourceId(id) then
+            ws.setSideItem(side, id)
+            return
         end
     end
+end
+
+function ws.textHas(payload, needle)
+    if type(payload) ~= 'string' then return false end
+    if payload:find(needle, 1, true) then return true end
+    local dec = u8:decode(needle)
+    return dec and payload:find(dec, 1, true) ~= nil
+end
+
+function ws.textHasUse(payload, itemName)
+    return ws.textHas(payload, "используйте '" .. itemName .. "'")
+        or ws.textHas(payload, 'используйте "' .. itemName .. '"')
+        or ws.textHas(payload, 'используйте «' .. itemName .. '»')
+end
+
+local function stackTotal(map)
+    local n = 0
+    for _, amt in pairs(map or {}) do
+        n = n + (tonumber(amt) or 0)
+    end
+    return n
+end
+
+-- Только [Ошибка] Чтобы заточить предмет, используйте 'Точильный амулет'
+-- НЕ трогаем [Подсказка] Для заточки нужен: Точильный камень или Точильный амулет
+local function clothResError(payload, itemName)
+    if type(payload) ~= 'string' or payload == '' then return false end
+    -- Подсказка с обоими ресурсами — всегда игнор
+    if ws.textHas(payload, 'Для заточки нужен') then return false end
+    if ws.textHas(payload, 'Точильный амулет') and ws.textHas(payload, 'Точильный камень') then
+        return false
+    end
+    -- Только форма ошибки «Чтобы заточить предмет, используйте ...»
+    if not ws.textHas(payload, 'Чтобы заточить предмет') then return false end
+    if not ws.textHas(payload, 'используйте') and not ws.textHas(payload, 'Используйте') then
+        return false
+    end
+    local hasA = ws.textHas(payload, 'Точильный амулет')
+    local hasS = ws.textHas(payload, 'Точильный камень')
+    if itemName == 'Точильный амулет' then
+        return hasA and not hasS
+    end
+    if itemName == 'Точильный камень' then
+        return hasS and not hasA
+    end
+    return false
+end
+
+function ws.setAmuletNeed(on)
+    on = not not on
+    local id = on and AMULET_ID or Whetstone_ITEM_ID
+    if ws.amuletNeed == on and (tonumber(ws.rightItemId) or -1) == id then
+        return false
+    end
+    ws.amuletNeed = on
+    ws.rightItemId = id
+    enchantSlotsData.right = -1
+    ws.busy = false
+    ws.pendingResult = nil
+    ws.lowMatSaid = false
+    ws.bestStone()
+    -- Сразу кладём амулет 1420 только при включении режима
+    if on and ws.autoOn() then
+        lua_thread.create(function()
+            wait(150)
+            local ok = ws.placeAmulet()
+            if not ok and (tonumber(ws.stoneSlot) or -1) < 0 then
+                sampAddChatMessage(u8:decode('[AutoZatochka] Нужен точильный амулет (1420) в инвентаре'), 0xFF3333)
+            end
+        end)
+    end
+    return true
+end
+
+-- Инвентарь больше сам не включает амулет (из‑за этого липло на предметах под камень).
+function ws.syncAmuletFromInv()
+    return false
+end
+
+function ws.noteAmuletDemand(payload)
+    -- Только скины / аксессуары
+    if not ws.isAmuletTab() then return false end
+    if clothResError(payload, 'Точильный амулет') then
+        ws.setAmuletNeed(true)
+        return true
+    end
+    if clothResError(payload, 'Точильный камень') then
+        ws.setAmuletNeed(false)
+        return true
+    end
+    return false
+end
+
+-- Ищет слот с item id 1420 в CEF-инвентаре, если пакет ещё не пришёл.
+function ws.findAmuletSlotJs()
+    local code = [[
+        try {
+            var want = 1420;
+            var all = document.querySelectorAll('.inventory-item-hoc, [data-slot], [data-index], img');
+            var i;
+            for (i = 0; i < all.length; i++) {
+                var n = all[i];
+                var alt = '';
+                var src = '';
+                var img = (n.tagName === 'IMG') ? n : n.querySelector('img');
+                if (img) {
+                    alt = img.getAttribute('alt') || '';
+                    src = img.getAttribute('src') || '';
+                }
+                var text = (n.innerText || n.textContent || '').toString();
+                var combined = alt + ' ' + src + ' ' + text;
+                var byId = combined.indexOf(String(want)) !== -1
+                    || combined.indexOf('Точильный амулет') !== -1
+                    || combined.indexOf('точильный амулет') !== -1;
+                if (!byId) continue;
+                var slotNum = -1;
+                var el = (n.tagName === 'IMG') ? (n.closest('[data-slot], [data-index], .inventory-item-hoc') || n) : n;
+                var sa = el.getAttribute('data-slot') || el.getAttribute('data-index');
+                if (sa != null) slotNum = parseInt(sa, 10);
+                if (!(slotNum >= 0)) continue;
+                window.__azAmuletSlot = slotNum;
+                return slotNum;
+            }
+            return -1;
+        } catch (e) { return -1; }
+    ]]
+    local val = ws.jsQuery(code, 700)
+    local n = tonumber(val)
+    if n and n >= 0 then
+        ws.slots1420 = ws.slots1420 or {}
+        ws.slots1420[n] = ws.slots1420[n] or 1
+        ws.stoneSlot = n
+        ws.stoneAmount = tonumber(ws.slots1420[n]) or 1
+        return n
+    end
+    return -1
+end
+
+-- Кладёт точильный амулет 1420 в правый слот станка (скины/аксессуары).
+function ws.placeAmulet()
+    if not ws.amuletNeed then return false end
+    ws.bestStone()
+    local idx = tonumber(enchantSlotsData.index) or -1
+    local slot = tonumber(ws.stoneSlot) or -1
+    if idx < 0 then return false end
+    if slot < 0 or (tonumber(ws.stoneAmount) or 0) <= 0 then
+        slot = ws.findAmuletSlotJs()
+        if slot < 0 then return false end
+    end
+    -- Уже лежит нужный амулет — не кликаем снова
+    if (tonumber(enchantSlotsData.right) or -1) == slot then
+        return true
+    end
+    local now = os.clock()
+    if (now - (tonumber(ws.lastPlaceAt) or 0)) < 0.8 then
+        return false
+    end
+    ws.lastPlaceAt = now
+    ws.clickOnBlock(slot, 1)
+    wait(80)
+    ws.clickInvSlot(slot, '1420')
+    local left = -1
+    if ws.isPair() then
+        local res = tonumber(ws.resSlot) or -1
+        if res >= 0 then left = res end
+    end
+    local json = ws.slotsJson(idx, left, slot, -1)
+    sendCEF('updateEnchantSlots|' .. json)
+    enchantSlotsData.right = slot
+    return true
+end
+
+function ws.noteFromText(payload)
+    if ws.noteAmuletDemand(payload) then return end
+    if not ws.isCloth() then return end
+    if ws.isArmor() and (tonumber(ws.rightItemId) or -1) < 0 then
+        if ws.textHas(payload, 'Заточка для бронежилета') or ws.textHas(payload, 'Заточка бронежилета') then
+            ws.setSideItem('right', ARMOR_STONE_ID)
+        end
+    end
+    if (tonumber(ws.leftItemId) or -1) < 0 then
+        local dill = ws.textHas(payload, 'Укроп')
+        local mat = ws.textHas(payload, 'Материал')
+        if dill and not mat then
+            ws.setSideItem('left', DILL_ID)
+        elseif mat and not dill then
+            ws.setSideItem('left', GUN_RES_ID)
+        end
+    end
+end
+
+function ws.notePayload(payload)
+    if type(payload) ~= 'string' or payload == '' then return end
+    ws.noteSideId(payload, 'right')
+    ws.noteSideId(payload, 'left')
+    ws.noteFromText(payload)
+end
+
+function ws.noteLeftItem(payload)
+    ws.notePayload(payload)
+end
+
+function ws.tryCost()
+    local needR = tonumber(ws.rightNeed)
+    if not needR or needR < 1 then
+        needR = ws.isGun() and 2 or 1
+    end
+    local needL = tonumber(ws.leftNeed) or 0
+    if needL < 0 then needL = 0 end
+    return needR, needL
+end
+
+-- Сколько полных попыток выйдет из всех стаков ресурсов, не из одной пачки.
+function ws.attemptsLeft()
+    local needR, needL = ws.tryCost()
+    local stones = stackTotal(ws.mapFor(ws.pickRightId()))
+    local n = math.floor(stones / needR)
+    if not ws.isPair() or needL < 1 then return n end
+    local res = stackTotal(ws.mapFor(ws.pickLeftId()))
+    local byRes = math.floor(res / needL)
+    if byRes < n then return byRes end
+    return n
+end
+
+function ws.pickDillLeft()
+    local id = tonumber(ws.leftItemId)
+    if id == DILL_ID or id == GUN_RES_ID then return id end
+    local dill = stackTotal(ws.slots510)
+    local mat = stackTotal(ws.slots511)
+    if dill > 0 and mat <= 0 then return DILL_ID end
+    if mat > 0 and dill <= 0 then return GUN_RES_ID end
+    if mat > 0 then return GUN_RES_ID end
+    return DILL_ID
+end
+
+function ws.bestRes()
+    local map = ws.mapFor(ws.pickLeftId()) or {}
+    local bestSlot, bestAmt, total = -1, -1, 0
+    for slot, amt in pairs(map) do
+        slot = tonumber(slot) or -1
+        amt = tonumber(amt) or 0
+        if slot >= 0 and amt > 0 then
+            total = total + amt
+            if amt > bestAmt then
+                bestAmt = amt
+                bestSlot = slot
+            end
+        end
+    end
+    ws.resTotal = total
     if bestSlot >= 0 then
         ws.resSlot = bestSlot
         ws.resAmount = bestAmt
@@ -1505,58 +1544,32 @@ function ws.jsQuery(code, timeout)
     return nil
 end
 
-function ws.clickInvSlot(slot, needle, tag)
+function ws.clickInvSlot(slot, needle)
     slot = tonumber(slot) or -1
     if slot < 0 then return nil end
-    needle = tostring(needle or '')
-    local code = 'var want=' .. tostring(slot) .. '; var needle="' .. needle .. '";' ..
-        [[
-        function fire(el) {
-            if (!el) return 0;
-            var t = el;
-            if (el.tagName === 'IMG') t = el.closest('[data-slot], .inventory-item-hoc, button, [role="button"]') || el;
-            var opts = { bubbles: true, cancelable: true, view: window };
-            t.dispatchEvent(new MouseEvent('pointerdown', opts));
-            t.dispatchEvent(new MouseEvent('mousedown', opts));
-            t.dispatchEvent(new MouseEvent('pointerup', opts));
-            t.dispatchEvent(new MouseEvent('mouseup', opts));
-            t.dispatchEvent(new MouseEvent('click', opts));
-            if (typeof t.click === 'function') t.click();
-            return 1;
-        }
-        var el = null;
-        var all = document.querySelectorAll('.inventory-item-hoc, [data-slot], [data-index]');
-        var i;
-        for (i = 0; i < all.length; i++) {
-            var n = all[i];
-            var s = n.getAttribute('data-slot') || n.getAttribute('data-index') || '';
-            if (String(s) === String(want)) { el = n; break; }
-        }
-        if (!el && needle) {
-            var imgs = document.querySelectorAll('img');
-            for (i = 0; i < imgs.length; i++) {
-                var a = (imgs[i].getAttribute('alt') || '') + ' ' + (imgs[i].getAttribute('src') || '');
-                if (a.indexOf(needle) !== -1) {
-                    el = imgs[i].closest('.inventory-item-hoc, [data-slot]') || imgs[i];
-                    break;
-                }
-            }
-        }
-        return fire(el);
-        ]]
-    local val = ws.jsQuery(code, 700)
-    wz.write('CLICK', 'cefQuery ' .. tostring(tag or 'slot') .. '=' .. tostring(slot) .. ' ret=' .. tostring(val))
-    return val
+    -- CEF-инвентарь: клик по номеру слота, как ArzMarket clickOnBlock.
+    if ws.cefInv then
+        ws.clickOnBlock(slot, 1)
+        return 1
+    end
+    -- Текстдравовый инвентарь: номер клетки с сетки 6x6, клик по её id.
+    local localSlot = slot % 36
+    local td = ws.invTd[localSlot]
+    if td and slot < 36 and type(sampSendClickTextdraw) == 'function' then
+        sampSendClickTextdraw(td)
+        return 1
+    end
+    ws.clickOnBlock(slot, 1)
+    return 1
 end
 
 function ws.clickStoneJs()
-    return ws.clickInvSlot(ws.stoneSlot, '1187', 'stone')
+    return ws.clickInvSlot(ws.stoneSlot, tostring(ws.pickRightId()))
 end
 
 function ws.loopReady()
-    if ws.isGun() then
+    if ws.isPair() then
         if not ws.resourcesReady() then return false end
-        if (tonumber(ws.available) or 0) ~= 1 then return false end
         if (os.clock() - (tonumber(ws.lastPlaceAt) or 0)) < 0.4 then return false end
         return true
     end
@@ -1564,39 +1577,40 @@ function ws.loopReady()
 end
 
 function ws.placeStone()
+    -- Скины/аксессуары после ошибки про амулет — кладём именно 1420
+    if ws.amuletNeed and ws.isAmuletTab() then
+        return ws.placeAmulet()
+    end
     ws.bestStone()
     ws.bestRes()
     local idx = tonumber(enchantSlotsData.index) or -1
     local stone = tonumber(ws.stoneSlot) or -1
-    local gun = ws.isGun()
+    local pair = ws.isPair()
     if idx < 0 then
-        if ws.loopTag ~= 'wait-item' then
-            wz.write('CLICK', gun and 'wait weapon on bench' or 'wait item on bench (click the item first)')
-        end
         return false
     end
     if stone < 0 or (tonumber(ws.stoneAmount) or 0) <= 0 then
-        if ws.loopTag ~= 'no-stone' then
-            wz.write('CLICK', gun and 'no gun stone 10253' or 'no whetstone 1187 in inventory')
-        end
         return false
     end
-    if gun then
+    if pair then
         local res = tonumber(ws.resSlot) or -1
         if res < 0 or (tonumber(ws.resAmount) or 0) <= 0 then
-            if ws.loopTag ~= 'no-res' then
-                wz.write('CLICK', 'no gun resource 511')
-            end
             return false
         end
         if not ws.enoughMats() then
             if not ws.lowMatSaid then
                 ws.lowMatSaid = true
-                wz.write('CLICK', 'not enough mats stoneN=' .. tostring(ws.stoneAmount)
-                    .. ' needR=' .. tostring(ws.rightNeed)
-                    .. ' resN=' .. tostring(ws.resAmount)
-                    .. ' needL=' .. tostring(ws.leftNeed))
-                sampAddChatMessage(u8:decode('Не хватает заточки на оружие или ресурса'), 0xFF3333)
+                if ws.isAttach() then
+                    sampAddChatMessage(u8:decode('Не хватает заточки обвеса или точильного камня'), 0xFF3333)
+                elseif ws.isGun() then
+                    sampAddChatMessage(u8:decode('Не хватает заточки на оружие или ресурса'), 0xFF3333)
+                else
+                    local miss = ws.resName(ws.pickRightId())
+                    if ws.isPair() then
+                        miss = miss .. ' или ' .. ws.resName(ws.pickLeftId())
+                    end
+                    sampAddChatMessage(u8:decode('Не хватает: ' .. miss), 0xFF3333)
+                end
             end
             return false
         end
@@ -1606,46 +1620,46 @@ function ws.placeStone()
         return true
     end
     local now = os.clock()
-    local gap = gun and 1.0 or 2.5
+    local gap = pair and 1.0 or 2.5
     if (now - (tonumber(ws.lastPlaceAt) or 0)) < gap then
         return false
     end
     ws.lastPlaceAt = now
     local left = tonumber(enchantSlotsData.left) or -1
     local right = tonumber(enchantSlotsData.right) or -1
-    if gun then
-        local res = tonumber(ws.resSlot) or -1
-        if left ~= res then
-            ws.clickInvSlot(res, '511', 'gun-res')
-            wz.write('CLICK', 'gun click res slot=' .. tostring(res))
-            return false
-        end
+    if pair then
+        -- Оружие: слева материалы, справа заточка. Обвес: слева камень, справа заточка обвеса.
+        -- Одежда: правый слот камень, амулет или заточка брони; левый — укроп или материалы, если станок просит.
+        left = tonumber(ws.resSlot) or -1
+        right = stone
+    else
         if right ~= stone then
-            ws.clickInvSlot(stone, '10253', 'gun-stone')
-            wz.write('CLICK', 'gun click stone slot=' .. tostring(stone) .. ' keepLeft=' .. tostring(res))
-            return false
+            ws.clickStoneJs()
         end
-        return ws.resourcesReady()
+        right = stone
     end
-    if right ~= stone then
-        ws.clickStoneJs()
-    end
-    local json = ws.slotsJson(idx, left, stone, -1)
+    local json = ws.slotsJson(idx, left, right, -1)
     sendCEF('updateEnchantSlots|' .. json)
-    wz.write('CLICK', 'place updateEnchantSlots|' .. json
-        .. ' stoneN=' .. tostring(ws.stoneAmount))
     return idx >= 0
 end
 
 function ws.handleSend(text)
     if type(text) ~= 'string' or text == '' then return end
-    if text:sub(1, 8) == 'REWRITE ' then return end
     local json = text:match('^updateEnchantSlots|(.+)')
     if not json then return end
     parseEnchantSlotsPayload(json)
     if not ws.autoOn() then return end
-    if ws.isGun() then return end
     local stone = tonumber(ws.stoneSlot) or -1
+    if ws.isPair() then
+        local res = tonumber(ws.resSlot) or -1
+        if res >= 0 and (tonumber(enchantSlotsData.left) or -1) < 0 then
+            enchantSlotsData.left = res
+        end
+        if stone >= 0 and (tonumber(enchantSlotsData.right) or -1) < 0 then
+            enchantSlotsData.right = stone
+        end
+        return
+    end
     if stone >= 0 and (tonumber(enchantSlotsData.right) or -1) == -1 then
         enchantSlotsData.right = stone
     end
@@ -1655,48 +1669,94 @@ function ws.ingestItems(items, invType)
     if type(items) ~= 'table' then return end
     invType = tonumber(invType) or 1
     if invType ~= 1 then return end
+    -- Пакет часто содержит один изменившийся слот. Остальные стаки не стираем.
     ws.slots1187 = ws.slots1187 or {}
     ws.slots10253 = ws.slots10253 or {}
     ws.slots511 = ws.slots511 or {}
+    ws.slots8701 = ws.slots8701 or {}
+    ws.slots510 = ws.slots510 or {}
+    ws.slots5736 = ws.slots5736 or {}
+    ws.slots1420 = ws.slots1420 or {}
+    local function dropSlot(slot)
+        ws.slots1187[slot] = nil
+        ws.slots10253[slot] = nil
+        ws.slots511[slot] = nil
+        ws.slots8701[slot] = nil
+        ws.slots510[slot] = nil
+        ws.slots5736[slot] = nil
+        ws.slots1420[slot] = nil
+    end
     local targetSlot = tonumber(enchantSlotsData.index) or -1
-    for _, item in ipairs(items) do
+    for _, item in pairs(items) do
         if type(item) == 'table' then
             local id = tonumber(item.item)
             local slot = tonumber(item.slot)
             if slot then
-                if id == Whetstone_ITEM_ID then
-                    ws.slots1187[slot] = tonumber(item.amount) or ws.slots1187[slot] or 1
-                    ws.slots10253[slot] = nil
-                    ws.slots511[slot] = nil
-                elseif id == GUN_STONE_ID then
-                    ws.slots10253[slot] = tonumber(item.amount) or ws.slots10253[slot] or 1
-                    ws.slots1187[slot] = nil
-                    ws.slots511[slot] = nil
-                elseif id == GUN_RES_ID then
-                    ws.slots511[slot] = tonumber(item.amount) or ws.slots511[slot] or 1
-                    ws.slots1187[slot] = nil
-                    ws.slots10253[slot] = nil
-                else
-                    ws.slots1187[slot] = nil
-                    ws.slots10253[slot] = nil
-                    ws.slots511[slot] = nil
+                local amt = tonumber(item.amount) or 1
+                dropSlot(slot)
+                if amt > 0 then
+                    if id == Whetstone_ITEM_ID then
+                        ws.slots1187[slot] = amt
+                    elseif id == GUN_STONE_ID then
+                        ws.slots10253[slot] = amt
+                    elseif id == GUN_RES_ID then
+                        ws.slots511[slot] = amt
+                    elseif id == ATTACH_STONE_ID then
+                        ws.slots8701[slot] = amt
+                    elseif id == DILL_ID then
+                        ws.slots510[slot] = amt
+                    elseif id == ARMOR_STONE_ID then
+                        ws.slots5736[slot] = amt
+                    elseif id == AMULET_ID then
+                        ws.slots1420[slot] = amt
+                    end
                 end
             end
             local ench = item.enchant
             local txtLvl = tostring(item.text or ''):match('%+(%d+)')
             local isTarget = (targetSlot >= 0 and slot == targetSlot)
             if isTarget then
-                local newLvl = tonumber(txtLvl) or tonumber(ench)
-                if id and id ~= Whetstone_ITEM_ID and id ~= GUN_STONE_ID and id ~= GUN_RES_ID then
+                local newLvl = tonumber(ench)
+                if newLvl == nil then newLvl = tonumber(txtLvl) end
+                if id and not ws.isResourceId(id) then
+                    local knownId = tonumber(ws.itemId) or -1
+                    local prev = -1
+                    if knownId == id and (tonumber(ws.itemSlot) or -1) == slot then
+                        prev = tonumber(ws.itemEnchant) or -1
+                    end
+                    -- Другой предмет на станке → снова камень (амулет только после своей ошибки)
+                    if knownId > 0 and knownId ~= id and ws.amuletNeed then
+                        ws.amuletNeed = false
+                        ws.rightItemId = Whetstone_ITEM_ID
+                        enchantSlotsData.right = -1
+                    end
                     ws.itemSlot = slot or ws.itemSlot
                     ws.itemId = id
-                    local prev = tonumber(ws.itemEnchant) or -1
                     if newLvl ~= nil then
+                        -- Успех только если уровень того же предмета вырос ровно на 1 после попытки.
+                        -- Первое появление +11 в слоте и «уже +11» успехом не считаем.
+                        local hold = ws.chatHold
+                        if hold and (os.clock() - (tonumber(hold.at) or 0)) > 8 then
+                            ws.chatHold = nil
+                            hold = nil
+                        end
+                        if hold and prev < 0 and newLvl == hold.toLvl then
+                            ws.chatHold = nil
+                            hold = nil
+                        end
+                        local grew = ws.pendingResult == 1 and prev >= 0 and newLvl == prev + 1
+                        if not grew and hold and prev >= 0 and prev == hold.fromLvl and newLvl == hold.toLvl and newLvl == prev + 1 then
+                            grew = true
+                            ws.chatHold = nil
+                        elseif hold and prev >= 0 and newLvl ~= hold.fromLvl and newLvl ~= hold.toLvl then
+                            ws.chatHold = nil
+                        end
                         ws.itemEnchant = newLvl
-                        if ws.pendingResult == 1 and newLvl ~= prev then
-                            ws.finishSuccess(prev >= 0 and prev or (newLvl - 1), newLvl)
-                        elseif status and (tonumber(max_toch) or 0) > 0 and newLvl >= (tonumber(max_toch) or 0) then
-                            ws.finishSuccess(prev >= 0 and prev or (newLvl - 1), newLvl)
+                        if grew then
+                            ws.finishSuccess(prev, newLvl)
+                        elseif ws.pendingResult == 1 then
+                            ws.pendingResult = nil
+                            ws.busy = false
                         end
                     end
                 end
@@ -1705,6 +1765,9 @@ function ws.ingestItems(items, invType)
     end
     ws.bestStone()
     ws.bestRes()
+    if ws.isAmuletTab() then
+        ws.syncAmuletFromInv()
+    end
 end
 
 function ws.handle(ev, payload)
@@ -1713,214 +1776,177 @@ function ws.handle(ev, payload)
     if ev == 'event.inventory.setWorkshopVisible' then
         local on = payload:find('true', 1, true) ~= nil
         workshop_check = on
-        if on then
-            wz.write('WS', 'visible')
-        else
-            wz.write('WS', 'hidden')
+        if not on then
             ws.busy = false
             enchantSlotsData.index = -1
             enchantSlotsData.left = -1
             enchantSlotsData.right = -1
             enchantSlotsData.color = -1
             ws.available = 0
-            ws.lastPlaceJson = ''
             ws.lastCat = nil
-            ws.leftOn = false
-            ws.rightOn = false
+            ws.leftItemId = nil
+            ws.rightItemId = -1
+            ws.amuletNeed = false
+            ws.pendingResult = nil
+            ws.chatHold = nil
+            ws.itemEnchant = -1
+            ws.itemId = -1
+            ws.itemSlot = -1
         end
         return
     end
     if ev == 'event.inventory.setWorkshopGunContext' then
         local on = payload:find('true', 1, true) ~= nil
         ws.gunCtx = on and true or false
-        wz.write('WS', 'gunCtx=' .. tostring(ws.gunCtx))
         if on then
             ws.lastCat = 6
-            if not ws.autoOn() then ws.tab = 1 end
+            if not ws.autoOn() and ws.isCloth() then ws.tab = 1 end
         else
-            if not ws.autoOn() then ws.tab = 0 end
+            if not ws.autoOn() and ws.isGun() then ws.tab = 0 end
         end
         return
     end
     if ev == 'event.workshop.setResourceNeedItems' then
         workshop_check = true
-        local ok, arr = safeDecodeJson(payload)
-        if ok and type(arr) == 'table' then
-            local row = arr[1] or arr
-            if type(row) == 'table' then
-                if row.leftResourceAmount ~= nil then ws.leftNeed = tonumber(row.leftResourceAmount) or 0 end
-                if row.rightResourceAmount ~= nil then ws.rightNeed = tonumber(row.rightResourceAmount) or 1 end
-            end
-        end
-        wz.write('WS', 'need left=' .. tostring(ws.leftNeed) .. ' right=' .. tostring(ws.rightNeed))
+        local ln = tonumber(payload:match('"leftResourceAmount":(%-?%d+)'))
+        local rn = tonumber(payload:match('"rightResourceAmount":(%-?%d+)'))
+        if ln then ws.leftNeed = ln end
+        if rn then ws.rightNeed = rn end
+        ws.noteLeftItem(payload)
         return
     end
     if ev == 'event.notify.initialize' then
         local msg = tostring(payload or '')
-        wz.write('NOTIFY', wz.clip(msg, 180))
-        if ws.isGun() then
-            if msg:find('Заточка на оружие', 1, true) or msg:find(u8:decode('Заточка на оружие'), 1, true) then
-                ws.busy = false
-                wz.write('WS', 'gun: not enough 10253')
-            end
+        -- Ошибка про амулет 1420 — всегда, даже если workshop_check ещё не успел
+        if ws.noteAmuletDemand(msg) then
+            return
+        end
+        if workshop_check then
+            ws.notePayload(msg)
+        end
+        local low = ws.textHas(msg, 'Заточка на оружие') or ws.textHas(msg, 'Заточка обвеса')
+            or ws.textHas(msg, 'Точильный камень') or ws.textHas(msg, 'Укроп')
+            or ws.textHas(msg, 'Материал') or ws.textHas(msg, 'Точильный амулет')
+            or ws.textHas(msg, 'Заточка для бронежилета') or ws.textHas(msg, 'Заточка бронежилета')
+        if low and (ws.isPair() or ws.isCloth() or ws.isWeaponTab()) then
+            ws.busy = false
         end
         return
     end
     if ev == 'event.inventory.workShop' then
         workshop_check = true
-        local ok, arr = safeDecodeJson(payload)
-        if not ok or type(arr) ~= 'table' then
-            wz.write('WS', 'workshop-json-fail ' .. wz.clip(payload, 200))
-            return
-        end
-        local row = arr[1]
-        if type(row) ~= 'table' then row = arr end
-        if type(row) ~= 'table' then return end
-        local action = tonumber(row.action)
-        local data = row.data or {}
+        local action = tonumber(payload:match('"action":(%-?%d+)'))
         if action == 2 then
-            if data.chance ~= nil then ws.chance = tonumber(data.chance) or ws.chance end
-            if data.cost ~= nil then ws.cost = tonumber(data.cost) or ws.cost end
-            if data.available ~= nil then ws.available = tonumber(data.available) or ws.available end
-            if data.amount ~= nil then ws.amount = tonumber(data.amount) or ws.amount end
-            wz.write('WS', 'ready chance=' .. tostring(ws.chance) .. ' cost=' .. tostring(ws.cost) .. ' av=' .. tostring(ws.available))
-        elseif action == 0 then
-            ws.busy = true
-            ws.busyAt = os.clock()
-            wz.write('WS', 'started ' .. tostring(data.time))
-        elseif action == 1 then
-            ws.busy = false
-            local suc = tonumber(data.success)
-            wz.write('WS', 'result success=' .. tostring(suc) .. ' ench=' .. tostring(ws.itemEnchant))
-            if suc == 1 then
-                ws.pendingResult = 1
+            local available = tonumber(payload:match('"available":(%-?%d+)'))
+            if available == nil and payload:find('"available":true', 1, true) then available = 1 end
+            if available == nil and payload:find('"available":false', 1, true) then available = 0 end
+            if available ~= nil then ws.available = available end
+        else
+            if action == 0 then
+                ws.busy = true
+                ws.busyAt = os.clock()
+                ws.attemptFrom = tonumber(ws.itemEnchant)
             else
-                ws.applyFail()
+                if action == 1 then
+                    local wasBusy = ws.busy
+                    ws.busy = false
+                    local suc = tonumber(payload:match('"success":(%-?%d+)'))
+                    if suc == nil and (payload:find('"success":true', 1, true) or payload:find('"success": true', 1, true)) then
+                        suc = 1
+                    end
+                    if suc == nil and (payload:find('"success":false', 1, true) or payload:find('"success": false', 1, true)) then
+                        suc = 0
+                    end
+                    -- Вставка скина и обновление слота тоже шлют action 1. Без начатой попытки в статистику не пишем.
+                    if wasBusy then
+                        if suc == 1 then
+                            ws.pendingResult = 1
+                            if (tonumber(ws.attemptFrom) or -1) < 0 then
+                                ws.attemptFrom = tonumber(ws.itemEnchant)
+                            end
+                        else
+                            ws.applyFail()
+                        end
+                    end
+                end
             end
         end
         return
-    end
-    if ev == 'event.inventory.playerInventory' then
-        local ok, arr = safeDecodeJson(payload)
-        if not ok or type(arr) ~= 'table' then return end
-        local row = arr[1]
-        if type(row) ~= 'table' then return end
-        local data = row.data or {}
-        if type(data.items) == 'table' then
-            ws.ingestItems(data.items, data.type)
-        end
     end
 end
 
 local function processCefText(str)
     if type(str) ~= 'string' or str == '' then return end
-    wz.cef(str)
-    local ev, payload
-    if arizona and arizona.decode then
-        local pkt = { id = 17, text = str }
-        local okd, decoded = pcall(arizona.decode, pkt)
-        if okd and decoded and pkt.event then
-            ev = pkt.event
-            if type(pkt.json) == 'string' then
-                payload = pkt.json
-            elseif encodeJson then
-                local oke, js = pcall(encodeJson, pkt.json)
-                if oke then payload = js end
-            end
-        end
-    end
-    if not ev then
-        ev, payload = wz.eventOf(str)
-    end
+    local ev, payload = eventOf(str)
     if ev then
         pcall(ws.handle, ev, payload or '')
     end
     if str:find('updateEnchantSlots', 1, true) then
         workshop_check = true
-        onEnchantSlotsUpdate(str:match('updateEnchantSlots|(.+)'))
+        parseEnchantSlotsPayload(str:match('updateEnchantSlots|(.+)'))
     end
 end
 
 local function processChatLine(text)
     if type(text) ~= 'string' or text == '' then return end
-    if (tonumber(max_toch) or 0) <= 0 then return end
     local t = text:gsub("%{%x%x%x%x%x%x%}", "")
+    if ws.noteAmuletDemand(t) then return end
+    if (tonumber(max_toch) or 0) <= 0 then return end
     local isSuccess, fromLvl, toLvl = parseEnchantLevelsFromChat(t)
     if isSuccess == nil then
-        if wz.hot(t) then wz.write('CHAT', t) end
         return
     end
-    wz.write('CHAT', (isSuccess and 'OK' or 'FAIL') .. ' +' .. tostring(fromLvl) .. ' -> +' .. tostring(toLvl) .. ' | ' .. t)
+    -- Карты: ждём именно сообщение Увы/Успех, только потом кладём снова
+    if ws.isCard() and (ws.busy or ws.card.waitingChat or status) then
+        ws.afterCardResult(isSuccess, fromLvl, toLvl)
+        return
+    end
+    local known = tonumber(ws.itemEnchant)
+    if known == nil or known < 0 then
+        known = tonumber(ws.attemptFrom)
+    end
+    if known == nil then known = -1 end
+    -- Сообщение про другой уровень (скин уже +11, а чат про +10 → +11) — фантом, не пишем.
+    if known >= 0 and fromLvl ~= known then
+        return
+    end
+    if known < 0 and not ws.busy and ws.pendingResult ~= 1 then
+        return
+    end
     if not isSuccess then
-        tochi = true
         ws.busy = false
         ws.pendingResult = nil
-        ws.releaseGunMats()
         ws.statFail()
         return
     end
     if isSuccess and toLvl then
-        pcall(playSuccessSound)
+        if known >= 0 and toLvl ~= known + 1 then
+            return
+        end
+        -- Уровень предмета ещё не видели: не записываем переход, пока инвентарь не подтвердит рост.
+        if known < 0 then
+            ws.chatHold = { fromLvl = fromLvl, toLvl = toLvl, at = os.clock() }
+            ws.busy = false
+            ws.pendingResult = nil
+            return
+        end
+        ws.itemEnchant = toLvl
+        ws.attemptFrom = toLvl
+        queueSuccessSound()
         ws.statOk(toLvl)
         ws.busy = false
         ws.pendingResult = nil
-        ws.releaseGunMats()
         local target = tonumber(max_toch) or 0
         if toLvl == target and fromLvl == (target - 1) then
-            tochi = false
             max_toch = 0
-            stone_check = false
             status = false
             sampAddChatMessage(u8:decode("У вас заточился предмет до указанной вами заточки, выбери другой предмет или другой уровень"), -1)
-        else
-            tochi = true
-        end
-    end
-end
-
-local function processTd(d)
-    if type(d) ~= 'table' then return end
-    local text = d.text or ''
-    local interesting = wz.hot(text) or d.modelId == Whetstone_ITEM_ID
-        or (d.letterColor == -10398017 and d.lineWidth == 44)
-        or text:find('WORKSHOP', 1, true) or text:find('ENCHANT', 1, true)
-        or text:find('МАСТЕРСКАЯ', 1, true) or text:find('Мастерская', 1, true)
-        or text:find('ВЕРСТАК', 1, true) or text:find('Верстак', 1, true) or text:find('верстак', 1, true)
-        or text:find('ЗАТОЧКА', 1, true) or text:find('Заточка', 1, true)
-    if interesting then
-        wz.write('TD', 'id=' .. tostring(d.id)
-            .. ' text=' .. wz.clip(text, 180)
-            .. ' color=' .. tostring(d.letterColor)
-            .. ' w=' .. tostring(d.lineWidth)
-            .. ' h=' .. tostring(d.lineHeight)
-            .. ' model=' .. tostring(d.modelId)
-            .. ' sel=' .. tostring(d.selectable))
-    end
-    if text:find('WORKSHOP', 1, true) or text:find('МАСТЕРСКАЯ', 1, true) or text:find('Мастерская', 1, true)
-        or text:find('ВЕРСТАК', 1, true) or text:find('Верстак', 1, true) or text:find('верстак', 1, true) then
-        stone = {}
-        workshop_check = true
-        wz.askDump()
-    end
-    if text:find('ENCHANT', 1, true) or text:find('ЗАТОЧКА', 1, true) or text:find('Заточка', 1, true) then
-        local id = tonumber(d.id) or 0
-        button_id = id - 1
-    end
-    if d.letterColor == -10398017 and d.lineWidth == 44 and d.lineHeight == 16 then
-        button_id = tonumber(d.id) or button_id
-    end
-    if workshop_check then
-        if stone_check and (tonumber(d.lineWidth) or 0) >= 1 then
-            stone_check = false
-        end
-        if d.modelId == Whetstone_ITEM_ID and d.selectable == 1 then
-            table.insert(stone, { tonumber(d.id) })
         end
     end
 end
 
 local function pumpIncoming()
-    wz.pumpOut()
+    pumpSend()
     if #incomingCef > 0 then
         local batch = incomingCef
         incomingCef = {}
@@ -1930,11 +1956,6 @@ local function pumpIncoming()
         local batch = incomingChat
         incomingChat = {}
         for i = 1, #batch do pcall(processChatLine, batch[i]) end
-    end
-    if #incomingTd > 0 then
-        local batch = incomingTd
-        incomingTd = {}
-        for i = 1, #batch do pcall(processTd, batch[i]) end
     end
 end
 
@@ -1958,16 +1979,28 @@ local function snapCefPacket(packet)
     if not packet then return end
     pcall(function()
         local t = packet.text
-        if type(t) == 'string' and t ~= '' then queueCef(t) end
+        if type(t) ~= 'string' or t == '' then return end
+        if t:find('playerInventory', 1, true) then
+            pcall(parsePlayerInventory, t)
+            return
+        end
+        if t:find('event.storage', 1, true) then return end
+        local keep = t:find('workShop', 1, true)
+            or t:find('setWorkshop', 1, true)
+            or t:find('setResourceNeedItems', 1, true)
+            or t:find('updateEnchantSlots', 1, true)
+            or t:find('event.notify.initialize', 1, true)
+            or t:find('startEnchant', 1, true)
+        if not keep then return end
+        queueCef(t)
     end)
 end
 
 local function snapSendPacket(packet)
     if not packet or type(packet.text) ~= 'string' or packet.text == '' then return end
     local t = packet.text
-    wz.queueSend(t)
+    queueSend(t)
     if not ws.autoOn() then return end
-    if ws.isGun() then return end
     local json = t:match('^updateEnchantSlots|(.+)')
     if not json then return end
     pcall(ws.bestStone)
@@ -1980,21 +2013,18 @@ local function snapSendPacket(packet)
     local color = tonumber(json:match('"color":(%-?%d+)')) or -1
     if idx < 0 then return end
     local need = false
-    if ws.isGun() then
-        if not (ws.leftOn and ws.rightOn and res >= 0 and stone >= 0) then return end
-        if left ~= res then
+    if ws.isPair() then
+        if res >= 0 and left ~= res then
             left = res
             need = true
         end
-        if right ~= stone then
-            right = stone
-            need = true
-        end
-    else
         if stone >= 0 and right ~= stone then
             right = stone
             need = true
         end
+    elseif stone >= 0 and right ~= stone then
+        right = stone
+        need = true
     end
     if color ~= -1 then
         color = -1
@@ -2002,11 +2032,6 @@ local function snapSendPacket(packet)
     end
     if not need then return end
     packet.text = 'updateEnchantSlots|' .. ws.slotsJson(idx, left, right, color)
-    local now = os.clock()
-    if not ws.lastRewriteLog or (now - ws.lastRewriteLog) > 1 then
-        ws.lastRewriteLog = now
-        wz.queueSend('REWRITE ' .. packet.text)
-    end
     return { packet }
 end
 
@@ -2014,7 +2039,7 @@ function main()
     while not isSampAvailable() do wait(100) end
     sampRegisterChatCommand('mt', function() WinState[0] = not WinState[0] end)
 
-    -- У кого нет lib/arizona-events: синхронная докачка → перезагрузка скрипта → уже с require
+    -- У кого нет lib/arizona-events: синхронная докачка -> перезагрузка скрипта -> уже с require
     if not arizonaEventsLibPresent() then
         sampAddChatMessage('[AutoZatochka] ' .. u8:decode('Не найдены библиотеки arizona-events. Скачиваю с GitHub...'), -1)
         local ok = syncArizonaEventsLib(true)
@@ -2023,7 +2048,7 @@ function main()
             wait(400)
             thisScript():reload()
         else
-            sampAddChatMessage('[AutoZatochka] ' .. u8:decode('Скачивание не удалось. Проверьте интернет. Файлы: zvyk/arizona-events на GitHub.'), -1)
+            sampAddChatMessage('[AutoZatochka] ' .. u8:decode('Скачивание не удалось. Проверьте интернет. Файлы: zatochka/arizona-events на GitHub.'), -1)
         end
         return
     end
@@ -2051,16 +2076,6 @@ function main()
         initSuccessSound()
     end)
 
-    -- Авто-проверка version.json только если enable_autoupdate = true (кнопка в меню — в любой момент)
-    if enable_autoupdate then
-        lua_thread.create(function()
-            wait(2000)
-            if autoupdate_loaded and Update then
-                pcall(Update.check, Update.json_url, Update.prefix, Update.url, true)
-            end
-        end)
-    end
-    
     -- Пакет 220 разбирает lib arizona-events (onArizonaDisplay / onArizonaIncomingCef18). Если библиотека не загрузилась — вручную.
     if not arizona then
         pcall(function()
@@ -2081,12 +2096,14 @@ function main()
                             local str = (encoded ~= 0) and raknetBitStreamDecodeString(bs, length + encoded) or raknetBitStreamReadString(bs, length)
                             if type(str) == 'string' then act = str end
                         end
-                    elseif packetType == 18 then
-                        local dataLength = raknetBitStreamReadInt16(bs)
-                        local encoded = raknetBitStreamReadInt8(bs)
-                        if dataLength and dataLength > 0 then
-                            local data = (encoded ~= 0) and raknetBitStreamDecodeString(bs, dataLength + encoded) or raknetBitStreamReadString(bs, dataLength)
-                            if type(data) == 'string' then act = data end
+                    else
+                        if packetType == 18 then
+                            local dataLength = raknetBitStreamReadInt16(bs)
+                            local encoded = raknetBitStreamReadInt8(bs)
+                            if dataLength and dataLength > 0 then
+                                local data = (encoded ~= 0) and raknetBitStreamDecodeString(bs, dataLength + encoded) or raknetBitStreamReadString(bs, dataLength)
+                                if type(data) == 'string' then act = data end
+                            end
                         end
                     end
                     if off and raknetBitStreamSetReadOffset then raknetBitStreamSetReadOffset(bs, off) end
@@ -2096,81 +2113,61 @@ function main()
         end)
     end
     
-    -- Устанавливаем обработчики CEF событий через JavaScript
-    evalanon([[
-        window.enchantInterfaceOpen = false;
-        window.workshopOpen = false;
-        
-        // Периодическая проверка наличия верстака
-        setInterval(function() {
-            const bodyText = (document.body.innerText || document.body.textContent || '').toUpperCase();
-            if (bodyText.includes('WORKSHOP') || bodyText.includes('ВЕРСТАК') || bodyText.includes('ENCHANT') || bodyText.includes('ЗАТОЧКА')) {
-                window.workshopOpen = true;
-            }
-            if (document.querySelectorAll('[data-item-id="1187"], [data-model="1187"]').length > 0) {
-                window.workshopOpen = true;
-            }
-        }, 1000);
-    ]])
     
     while true do
         pcall(pumpIncoming)
-        wz.flushState()
-        if wz.needDump then
-            wz.needDump = false
-            wz.lastDump = os.clock()
-            wz.write('DOM', 'dump start')
-            pcall(evalanon, wz.jsDump)
-            wait(250)
-            local dump
-            pcall(function()
-                dump = evalcefReturn('return window.__azDump || "";')
-            end)
-            wz.write('DOM', (dump ~= nil and tostring(dump) ~= '' and tostring(dump)) or 'empty (eval did not return DOM)')
+        if wantSound then
+            wantSound = false
+            playSuccessSound()
         end
         wait(0)
         if ws.autoOn() then
             local target = tonumber(max_toch) or 0
             local lvl = tonumber(ws.itemEnchant) or -1
-            if target > 0 and lvl >= target then
-                wz.write('LOOP', 'done ench=' .. tostring(lvl))
+            if target > 0 and lvl >= target and not ws.isCard() then
                 status = false
                 max_toch = 0
-                tochi = false
-                sampAddChatMessage(u8:decode("У вас заточился предмет до указанной вами заточки, выбери другой предмет или другой уровень"), -1)
-            elseif not workshop_check then
-                if ws.loopTag ~= 'wait' then
-                    ws.loopTag = 'wait'
-                    wz.write('LOOP', 'wait-workshop ' .. wz.state())
-                end
-                wait(500)
-            elseif ws.busy then
-                if os.clock() - (tonumber(ws.busyAt) or 0) > 20 then
-                    wz.write('LOOP', 'busy-timeout')
-                    ws.busy = false
-                    ws.loopTag = ''
-                else
-                    wait(120)
-                end
-            else
-                local ready = ws.loopReady()
-                if ready then
-                    ws.loopTag = 'go'
-                    wz.write('LOOP', 'go ' .. wz.state())
-                    ws.busy = true
-                    ws.busyAt = os.clock()
-                    triggerEnchantClick()
+                sampAddChatMessage(u8:decode("Предмет уже +" .. tostring(lvl) .. ", выбери уровень выше"), -1)
+            elseif ws.isCard() then
+                -- Эликсир мастер: из инвентаря 2 карты → Улучшить → ждём чат
+                local c = ws.card
+                if not c.open then
+                    wait(400)
+                elseif c.waitingChat or ws.busy then
+                    if os.clock() - (tonumber(ws.busyAt) or 0) > 25 then
+                        ws.busy = false
+                        c.waitingChat = false
+                    else
+                        wait(150)
+                    end
+                elseif ws.cardReady() then
+                    ws.startCardEnchant()
                     wait(800)
                 else
-                    if ws.loopTag ~= 'not-ready' then
-                        ws.loopTag = 'not-ready'
-                        wz.write('LOOP', 'not-ready ' .. wz.state())
-                    end
-                    click_onStone()
-                    if ws.isGun() then
-                        wait(600)
+                    ws.placeCards()
+                    wait(500)
+                end
+            else
+                if not workshop_check then
+                    wait(500)
+                else
+                    if ws.busy then
+                        if os.clock() - (tonumber(ws.busyAt) or 0) > 20 then
+                            ws.busy = false
+                        else
+                            wait(120)
+                        end
                     else
-                        wait(800)
+                        local ready = ws.loopReady()
+                        if ready then
+                            ws.busy = true
+                            ws.busyAt = os.clock()
+                            startEnchant()
+                            wait(800)
+                        else
+                            ws.placeStone()
+                            wait(ws.isPair() and 600 or 800)
+                        end
                     end
                 end
             end
@@ -2182,7 +2179,7 @@ function ws.uiAccent()
     return imgui.ImVec4(0.36, 0.58, 1.00, 1)
 end
 
-function ws.uiNav(label, selected, w)
+function ws.uiNav(label, selected, w, h)
     if selected then
         imgui.PushStyleColor(imgui.Col.Button, ws.uiAccent())
         imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.46, 0.66, 1, 1))
@@ -2194,7 +2191,7 @@ function ws.uiNav(label, selected, w)
         imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.36, 0.58, 1, 0.35))
         imgui.PushStyleColor(imgui.Col.Text, imgui.ImVec4(0.78, 0.80, 0.86, 1))
     end
-    local clicked = imgui.Button(label, imgui.ImVec2(w, 32))
+    local clicked = imgui.Button(label, imgui.ImVec2(w, h or 32))
     imgui.PopStyleColor(4)
     return clicked
 end
@@ -2227,27 +2224,36 @@ function ws.uiLvl(i, w, h)
 end
 
 function ws.pickLevel(i)
+    i = tonumber(i) or 0
+    if ws.isCard() and i > 3 then i = 3 end
     if max_toch ~= i then
         status = true
         max_toch = i
         ws.lowMatSaid = false
-        wz.write('UI', 'toch +' .. tostring(i) .. ' ' .. wz.state())
         lua_thread.create(function()
             wait(120)
-            click_onStone()
+            if ws.isCard() then
+                ws.card.waitingChat = false
+                ws.card.placed = 0
+                ws.busy = false
+                ws.placeCards()
+                wait(500)
+                if status and ws.cardReady() then
+                    ws.startCardEnchant()
+                end
+                return
+            end
+            ws.placeStone()
             wait(400)
             if status and ws.loopReady() and not ws.busy then
                 ws.busy = true
                 ws.busyAt = os.clock()
-                triggerEnchantClick()
+                startEnchant()
             end
         end)
     else
         status = false
         max_toch = 0
-        tochi = false
-        stone_check = false
-        wz.write('UI', 'stop +' .. tostring(i))
     end
 end
 
@@ -2269,26 +2275,211 @@ function ws.drawSettingsBody()
             thisScript():reload()
         end)
     end
-    imgui.Dummy(imgui.ImVec2(0, 4))
-    if imgui.Button('Проверить обновления', imgui.ImVec2(476, 32)) then
-        lua_thread.create(function()
-            if autoupdate_loaded and Update then
-                sampAddChatMessage('[AutoZatochka] ' .. u8:decode('Проверка обновлений...'), -1)
-                wait(100)
-                pcall(Update.check, Update.json_url, Update.prefix, Update.url, false)
-            else
-                sampAddChatMessage('[AutoZatochka] ' .. u8:decode('Автообновление недоступно (нет decodeJson).'), -1)
-            end
-        end)
-    end
     imgui.Dummy(imgui.ImVec2(0, 14))
-    imgui.TextDisabled('/mt  закрыть окно')
+    imgui.TextDisabled('/mt  — открыть окно')
     imgui.TextDisabled('Шестерёнка ещё раз — назад')
+end
+
+function ws.modeTitle()
+    if ws.isCard() then return 'Эликсир мастер' end
+    if ws.isGun() then return 'Скины на оружие' end
+    if ws.isAttach() then return 'Обвесы' end
+    if ws.isArmor() then return 'Бронежилеты' end
+    if ws.isSkin() then return 'Скины' end
+    return 'Аксессуары'
+end
+
+function ws.chooseMode(tab)
+    tab = tonumber(tab) or 0
+    local shop = 'cloth'
+    if tab == 1 or tab == 2 then shop = 'gun'
+    elseif tab == 5 then shop = 'card' end
+    if tonumber(ws.tab) ~= tab then
+        ws.setTab(tab)
+    end
+    ws.shop = shop
+    ws.picker = nil
+    ws.screen = 'work'
+end
+
+function ws.drawHome()
+    imgui.SetCursorPos(imgui.ImVec2(16, 64))
+    imgui.TextDisabled('Выбери мастерскую')
+    imgui.SetCursorPos(imgui.ImVec2(16, 96))
+    if ws.uiNav('Мастерская одежды', ws.picker == 'cloth', 476, 52) then
+        ws.picker = 'cloth'
+        ws.shop = 'cloth'
+    end
+    imgui.SetCursorPos(imgui.ImVec2(16, 160))
+    if ws.uiNav('Магазин оружия', ws.picker == 'gun', 476, 52) then
+        ws.picker = 'gun'
+        ws.shop = 'gun'
+    end
+    imgui.SetCursorPos(imgui.ImVec2(16, 224))
+    if ws.uiNav('Эликсир мастер', ws.isCard() or ws.picker == 'card', 476, 52) then
+        ws.chooseMode(5)
+    end
+end
+
+function ws.drawPicker()
+    local cloth = ws.picker == 'cloth'
+    local W = 360
+    local H = cloth and 292 or 228
+    imgui.SetNextWindowPos(imgui.ImVec2(780, 460), imgui.Cond.FirstUseEver, imgui.ImVec2(0, 0.5))
+    imgui.SetNextWindowSize(imgui.ImVec2(W, H), imgui.Cond.Always)
+    imgui.Begin('##azPicker', nil, imgui.WindowFlags.NoDecoration)
+    local dl = imgui.GetWindowDrawList()
+    local p = imgui.GetWindowPos()
+    local sz = imgui.GetWindowSize()
+    dl:AddRectFilled(p, imgui.ImVec2(p.x + 4, p.y + sz.y), imgui.ColorConvertFloat4ToU32(ws.uiAccent()), 2)
+    imgui.SetCursorPos(imgui.ImVec2(16, 14))
+    imgui.PushStyleColor(imgui.Col.Text, ws.uiAccent())
+    imgui.Text(cloth and 'Мастерская одежды' or 'Магазин оружия')
+    imgui.PopStyleColor()
+    imgui.SetCursorPos(imgui.ImVec2(W - 44, 8))
+    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.8, 0.22, 0.32, 0.35))
+    imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.9, 0.25, 0.35, 0.7))
+    imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.9, 0.25, 0.35, 0.9))
+    if imgui.Button('X##picker', imgui.ImVec2(28, 28)) then
+        ws.picker = nil
+    end
+    imgui.PopStyleColor(3)
+    imgui.SetCursorPos(imgui.ImVec2(16, 56))
+    imgui.TextDisabled('Что точить')
+    if cloth then
+        imgui.SetCursorPos(imgui.ImVec2(16, 86))
+        if ws.uiNav('Аксессуары', ws.isAcc(), 328, 44) then ws.chooseMode(0) end
+        imgui.SetCursorPos(imgui.ImVec2(16, 138))
+        if ws.uiNav('Скины', ws.isSkin(), 328, 44) then ws.chooseMode(3) end
+        imgui.SetCursorPos(imgui.ImVec2(16, 190))
+        if ws.uiNav('Бронежилеты', ws.isArmor(), 328, 44) then ws.chooseMode(4) end
+        imgui.SetCursorPos(imgui.ImVec2(16, 248))
+        imgui.TextDisabled('Ресурс скрипт выберет сам')
+    else
+        imgui.SetCursorPos(imgui.ImVec2(16, 86))
+        if ws.uiNav('Скины на оружие', ws.isGun(), 328, 44) then ws.chooseMode(1) end
+        imgui.SetCursorPos(imgui.ImVec2(16, 138))
+        if ws.uiNav('Обвесы', ws.isAttach(), 328, 44) then ws.chooseMode(2) end
+    end
+    imgui.End()
+end
+
+function ws.drawWork()
+    imgui.SetCursorPos(imgui.ImVec2(16, 48))
+    if ws.uiNav('Назад', false, 88, 32) then
+        status = false
+        max_toch = 0
+        ws.screen = 'home'
+        ws.picker = (ws.shop == 'card') and nil or ws.shop
+    end
+    imgui.SameLine()
+    imgui.Text(ws.modeTitle())
+
+    imgui.SetCursorPos(imgui.ImVec2(16, 90))
+    if imgui.BeginChild('##status', imgui.ImVec2(476, 70), false) then
+        local ench = tonumber(ws.itemEnchant) or -1
+        local run = status and (tonumber(max_toch) or 0) > 0
+        if run then
+            imgui.PushStyleColor(imgui.Col.Text, imgui.ImVec4(0.45, 0.85, 0.55, 1))
+            imgui.Text('Точит до +' .. tostring(max_toch))
+            imgui.PopStyleColor()
+        else
+            imgui.TextDisabled('Выбери уровень')
+        end
+        if ench >= 0 then
+            imgui.SameLine()
+            imgui.TextDisabled('  ·  сейчас +' .. tostring(ench))
+        end
+        if ws.isCard() then
+            local nCards = ws.cardCount(tonumber(max_toch) or 99)
+            local c = ws.card
+            imgui.TextDisabled('Карт в инвентаре: ' .. tostring(nCards) .. '  ·  на попытку 2')
+            if not c.open then
+                imgui.TextDisabled('Открой Эликсир мастер в игре')
+            end
+        else
+            local needR, needL = ws.tryCost()
+            local line = ws.resName(ws.pickRightId()) .. '  ' .. tostring(ws.stoneTotal or 0) .. ' / ' .. tostring(needR)
+            if ws.isPair() then
+                line = line .. '      ' .. ws.resName(ws.pickLeftId()) .. '  ' .. tostring(ws.resTotal or 0) .. ' / ' .. tostring(needL)
+            end
+            imgui.TextDisabled(line)
+            imgui.TextDisabled('Хватит на ' .. attemptsWord(ws.attemptsLeft()))
+        end
+        imgui.EndChild()
+    end
+
+    imgui.SetCursorPos(imgui.ImVec2(16, 168))
+    imgui.TextDisabled('Точить до')
+    do
+        local i
+        local maxL = ws.maxLevel()
+        for i = 1, maxL do
+            local col = (i - 1) % 4
+            local row = math.floor((i - 1) / 4)
+            imgui.SetCursorPos(imgui.ImVec2(16 + col * 118, 190 + row * 36))
+            if ws.uiLvl(i, 110, 30) then
+                ws.pickLevel(i)
+            end
+        end
+    end
+
+    imgui.SetCursorPos(imgui.ImVec2(16, 306))
+    if imgui.BeginChild('##stats', imgui.ImVec2(476, 118), false) then
+        imgui.PushStyleColor(imgui.Col.Text, ws.uiAccent())
+        imgui.Text('Статистика  ·  ' .. ws.modeTitle())
+        imgui.PopStyleColor()
+        imgui.Separator()
+        local rows, total, cur
+        if ws.isGun() then
+            rows = ws.gRows or {}
+            total = tonumber(ws.gAll) or 0
+            cur = tonumber(ws.gLvl) or 0
+        elseif ws.isAttach() then
+            rows = ws.aRows or {}
+            total = tonumber(ws.aAll) or 0
+            cur = tonumber(ws.aLvl) or 0
+        elseif ws.isSkin() then
+            rows = ws.dRows or {}
+            total = tonumber(ws.dAll) or 0
+            cur = tonumber(ws.dLvl) or 0
+        elseif ws.isArmor() then
+            rows = ws.vRows or {}
+            total = tonumber(ws.vAll) or 0
+            cur = tonumber(ws.vLvl) or 0
+        elseif ws.isCard() then
+            rows = ws.cRows or {}
+            total = tonumber(ws.cAll) or 0
+            cur = tonumber(ws.cLvl) or 0
+        else
+            rows = lost_stone
+            total = all_lost
+            cur = lost_stone_onLVL
+        end
+        local n
+        for n = 1, #rows do
+            local v = rows[n]
+            if type(v) == 'table' then
+                imgui.Text('С +' .. tostring((v[2] or 1) - 1) .. ' до +' .. tostring(v[2]) .. '  —  ' .. attemptsWord(v[1]))
+            end
+        end
+        if cur > 0 then
+            imgui.TextDisabled('Сейчас  ' .. attemptsWord(cur))
+        end
+        imgui.TextDisabled('Всего попыток  ' .. tostring(total))
+        imgui.EndChild()
+    end
 end
 
 imgui.OnFrame(function() return WinState[0] end,
     function()
-        local W, H = 508, 418
+        local W = 508
+        local H = 320
+        if SetWin[0] then
+            H = 400
+        elseif (ws.screen or 'home') == 'work' then
+            H = 448
+        end
         imgui.SetNextWindowPos(imgui.ImVec2(500, 500), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
         imgui.SetNextWindowSize(imgui.ImVec2(W, H), imgui.Cond.Always)
         imgui.Begin('##Window', WinState, imgui.WindowFlags.NoDecoration)
@@ -2340,190 +2531,43 @@ imgui.OnFrame(function() return WinState[0] end,
             imgui.Dummy(imgui.ImVec2(0, 8))
             ws.drawSettingsBody()
         else
-            imgui.SetCursorPos(imgui.ImVec2(16, 48))
-            if ws.uiNav('Заточка аксов/скинов', tonumber(ws.tab) == 0, 234) then
-                ws.setTab(0)
-            end
-            imgui.SameLine()
-            if ws.uiNav('Скины на оружие', tonumber(ws.tab) == 1, 234) then
-                ws.setTab(1)
-            end
-
-            imgui.SetCursorPos(imgui.ImVec2(16, 90))
-            if imgui.BeginChild('##status', imgui.ImVec2(476, 52), false) then
-                local ench = tonumber(ws.itemEnchant) or -1
-                local run = status and (tonumber(max_toch) or 0) > 0
-                if run then
-                    imgui.PushStyleColor(imgui.Col.Text, imgui.ImVec4(0.45, 0.85, 0.55, 1))
-                    imgui.Text('Точит до +' .. tostring(max_toch))
-                    imgui.PopStyleColor()
-                else
-                    imgui.TextDisabled('Выбери уровень')
-                end
-                if ench >= 0 then
-                    imgui.SameLine()
-                    imgui.TextDisabled('  ·  сейчас +' .. tostring(ench))
-                end
-                if ws.isGun() then
-                    imgui.TextDisabled('Камни  ' .. tostring(ws.stoneAmount or 0) .. ' / ' .. tostring(ws.rightNeed or 2)
-                        .. '      Ресурс  ' .. tostring(ws.resAmount or 0) .. ' / ' .. tostring(ws.leftNeed or 0))
-                else
-                    imgui.TextDisabled('Точильные камни  ' .. tostring(ws.stoneAmount or 0))
-                end
-                imgui.EndChild()
-            end
-
-            imgui.SetCursorPos(imgui.ImVec2(16, 146))
-            imgui.TextDisabled('Точить до')
-            do
-                local i
-                for i = 1, 12 do
-                    local col = (i - 1) % 4
-                    local row = math.floor((i - 1) / 4)
-                    imgui.SetCursorPos(imgui.ImVec2(16 + col * 118, 168 + row * 36))
-                    if ws.uiLvl(i, 110, 30) then
-                        ws.pickLevel(i)
-                    end
-                end
-            end
-
-            imgui.SetCursorPos(imgui.ImVec2(16, 284))
-            if imgui.BeginChild('##stats', imgui.ImVec2(476, 118), false) then
-                imgui.PushStyleColor(imgui.Col.Text, ws.uiAccent())
-                imgui.Text(ws.isGun() and 'Статистика  ·  скины на оружие' or 'Статистика  ·  аксы/скины')
-                imgui.PopStyleColor()
-                imgui.Separator()
-                local rows = ws.isGun() and (ws.gRows or {}) or lost_stone
-                local total = ws.isGun() and (tonumber(ws.gAll) or 0) or all_lost
-                local cur = ws.isGun() and (tonumber(ws.gLvl) or 0) or lost_stone_onLVL
-                local n
-                for n = 1, #rows do
-                    local v = rows[n]
-                    if type(v) == 'table' then
-                        imgui.Text('С +' .. tostring((v[2] or 1) - 1) .. ' до +' .. tostring(v[2]) .. '  —  ' .. attemptsWord(v[1]))
-                    end
-                end
-                if cur > 0 then
-                    imgui.TextDisabled('Сейчас  ' .. attemptsWord(cur))
-                end
-                imgui.TextDisabled('Всего попыток  ' .. tostring(total))
-                imgui.EndChild()
+            if (ws.screen or 'home') == 'work' then
+                ws.drawWork()
+            else
+                ws.drawHome()
             end
         end
         imgui.End()
+        if ws.picker and not SetWin[0] and (ws.screen or 'home') ~= 'work' then
+            ws.drawPicker()
+        end
     end
 )
 
--- == Проверка и установка флага верстака == --
-function checkWorkshopStatus()
-    evalanon([[
-        try {
-            const bodyText = (document.body.innerText || document.body.textContent || '').toUpperCase();
-            const hasKeywords = bodyText.includes('WORKSHOP') || bodyText.includes('ВЕРСТАК') || 
-                               bodyText.includes('МАСТЕРСКАЯ') || bodyText.includes('ENCHANT') || 
-                               bodyText.includes('ЗАТОЧКА');
-            
-            const hasEnchantElements = document.querySelectorAll('[class*="enchant"], [class*="Enchant"], [id*="enchant"]').length > 0;
-            const hasWorkshopElements = document.querySelectorAll('[class*="workshop"], [class*="Workshop"], [id*="workshop"]').length > 0;
-            let hasStoneElements = document.querySelectorAll('[data-item-id="1187"], [data-model="1187"], [data-id="1187"]').length > 0;
-            
-            if (!hasStoneElements) {
-                const inventoryItems = document.querySelectorAll('.inventory-item-hoc');
-                for (let item of inventoryItems) {
-                    const img = item.querySelector('.inventory-item__image');
-                    if (img) {
-                        const alt = img.getAttribute('alt') || '';
-                        const itemId = parseInt(alt.match(/\d+/)?.[0]) || 0;
-                        if (itemId === 1187) {
-                            hasStoneElements = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            if (hasKeywords || hasEnchantElements || hasWorkshopElements || hasStoneElements || 
-                window.enchantInterfaceOpen === true || window.workshopOpen === true) {
-                window.workshopDetected = true;
-            } else {
-                window.workshopDetected = false;
-            }
-        } catch(e) {
-            window.workshopDetected = false;
-        }
-    ]])
-    wait(50)
-    -- arizona.eval не возвращает значение из CEF — при активной автозаточке верстак уже открыт
-    if status and max_toch > 0 then
-        workshop_check = true
-        return
-    end
-    local detected = evalcefReturn('return window.workshopDetected === true || window.workshopOpen === true;')
-    if detected == true or detected == 1 or detected == 'true' then
-        workshop_check = true
-    end
-    wz.write('WS', 'check detected=' .. tostring(detected) .. ' ' .. wz.state())
-end
-
 -- == Обработка событий: копии в очередь, прошлые хуки не затираем == --
 if sampev then
+
     local prevTd = sampev.onShowTextDraw
     function sampev.onShowTextDraw(id, data)
-        pcall(function()
-            if type(data) ~= 'table' then return end
-            local text = data.text
-            queueTd({
-                id = tonumber(id) or 0,
-                text = type(text) == 'string' and (text .. '') or '',
-                letterColor = tonumber(data.letterColor),
-                lineWidth = tonumber(data.lineWidth),
-                lineHeight = tonumber(data.lineHeight),
-                modelId = tonumber(data.modelId),
-                selectable = tonumber(data.selectable),
-            })
-        end)
+        pcall(ws.noteTd, id, data)
         if prevTd then
-            local ok, a, b = pcall(prevTd, id, data)
-            if ok then return a, b end
+            local ok, a = pcall(prevTd, id, data)
+            if ok then return a end
         end
     end
 
     local prevMsg = sampev.onServerMessage
     function sampev.onServerMessage(color, text)
         pcall(function()
-            if type(text) == 'string' and text ~= '' then queueChat(text) end
+            if type(text) == 'string' and text ~= '' then
+                queueChat(text)
+            end
         end)
         if prevMsg then
             local ok, a = pcall(prevMsg, color, text)
             if ok then return a end
         end
     end
-end
-
-function imgui.ColoredButton(text, size, hex, trans)
-    local r,g,b = tonumber("0x"..hex:sub(1,2)), tonumber("0x"..hex:sub(3,4)), tonumber("0x"..hex:sub(5,6))
-    local a
-    if tonumber(trans) ~= nil and tonumber(trans) < 101 and tonumber(trans) > 0 then
-        a = trans
-    else a = 60 end
-    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(r/255, g/255, b/255, a/100))
-    imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(r/255, g/255, b/255, a/100))
-    imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(r/255, g/255, b/255, a/100))
-    local button = imgui.Button(text, size)
-    imgui.PopStyleColor(3)
-    return button
-end
-
-function imgui.ColSeparator(hex, trans)
-    local r,g,b = tonumber("0x"..hex:sub(1,2)), tonumber("0x"..hex:sub(3,4)), tonumber("0x"..hex:sub(5,6))
-    local a
-    if tonumber(trans) ~= nil and tonumber(trans) < 101 and tonumber(trans) > 0 then
-        a = trans
-    else a = 100 end
-    imgui.PushStyleColor(imgui.Col.Separator, imgui.ImVec4(r/255, g/255, b/255, a/100))
-    local colsep = imgui.Separator()
-    imgui.PopStyleColor(1)
-    return colsep
 end
 
 imgui.OnInitialize(function()
@@ -2555,9 +2599,9 @@ function theme()
     imgui.GetStyle().GrabRounding = 4
     imgui.GetStyle().TabRounding = 6
 
-    imgui.GetStyle().Colors[imgui.Col.Text]                   = ImVec4(0.91, 0.92, 0.94, 1.00)
-    imgui.GetStyle().Colors[imgui.Col.TextDisabled]           = ImVec4(0.55, 0.57, 0.63, 1.00)
-    imgui.GetStyle().Colors[imgui.Col.WindowBg]               = ImVec4(0.055, 0.06, 0.08, 0.96)
+    imgui.GetStyle().Colors[imgui.Col.Text]                   = ImVec4(0.94, 0.95, 0.97, 1.00)
+    imgui.GetStyle().Colors[imgui.Col.TextDisabled]           = ImVec4(0.54, 0.57, 0.63, 1.00)
+    imgui.GetStyle().Colors[imgui.Col.WindowBg]               = ImVec4(0.047, 0.055, 0.078, 0.97)
     imgui.GetStyle().Colors[imgui.Col.ChildBg]                = ImVec4(0.07, 0.08, 0.11, 0.55)
     imgui.GetStyle().Colors[imgui.Col.PopupBg]                = ImVec4(0.09, 0.10, 0.13, 0.98)
     imgui.GetStyle().Colors[imgui.Col.Border]                 = ImVec4(1.00, 1.00, 1.00, 0.06)
