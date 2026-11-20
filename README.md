@@ -1,34 +1,177 @@
-# AutoZatochka
+<p align="center">
+  <img src="images/readme-banner.svg" width="100%" alt="AutoZatochka — заточка без лишних кликов. Одежда, оружие и карты Arizona RP.">
+</p>
 
-Автозаточка для **Arizona RP** (MoonLoader + mimgui + arizona-events).
+<p align="center">
+  <a href="https://github.com/andergr0ynd/zatochka/releases/latest/download/AutoZatochka.zip"><img src="images/download-package.svg" width="285" alt="Скачать готовый комплект AutoZatochka с библиотеками и звуком"></a>
+  &nbsp;
+  <a href="https://github.com/andergr0ynd/zatochka/releases/latest/download/autozatochka.lua"><img src="images/download-script.svg" width="285" alt="Скачать только autozatochka.lua"></a>
+  &nbsp;
+  <a href="https://www.blast.hk/threads/257714/"><img src="images/download-blast.svg" width="285" alt="Скачать с Blast.hk — открыть тему автозаточки"></a>
+</p>
 
-Команда в игре: `/mt`
+<p align="center">
+  <strong>Версия на GitHub: 1.26</strong> · Windows · Arizona RP · MoonLoader<br>
+  Выбери предмет и целевой уровень — скрипт выполнит повторяющиеся действия заточки.
+</p>
 
-## Возможности
+<p align="center">
+  <a href="#install">Установка</a> &nbsp;·&nbsp;
+  <a href="#start">Первый запуск</a> &nbsp;·&nbsp;
+  <a href="#modes">Режимы</a> &nbsp;·&nbsp;
+  <a href="#faq">Вопросы</a> &nbsp;·&nbsp;
+  <a href="https://www.blast.hk/threads/257714/">Тема на Blast</a>
+</p>
 
-- Автозаточка одежды, оружия и обвесов
-- Режим **Эликсир мастер** (карты)
-- Работа через CEF-верстак (`workShop` / `startEnchant`)
-- Звук успеха (`applepay.mp3`)
-- Автодокачка `lib/arizona-events`, если библиотеки нет
+---
 
-## Установка
+## Один скрипт — три направления
 
-1. Нужны **MoonLoader**, **mimgui**, **SAMPFUNCS/samp.events**
-2. Скрипт: положи `autozatochka.lua` в `moonloader\`
-3. Библиотеки: папка `arizona-events` ? `moonloader\lib\arizona-events\`  
-   (скрипт может скачать сам при первом запуске)
-4. Звук (опционально): `applepay.mp3` ? `moonloader\autozatochka\`
+| Где точить | Что поддерживается |
+| :--- | :--- |
+| **Мастерская одежды** | Аксессуары, скины и бронежилеты |
+| **Магазин оружия** | Скины на оружие и обвесы |
+| **Эликсир мастер** | Улучшение карт из инвентаря |
 
-## Файлы репозитория
+Выбор целевого уровня, установка ресурсов на станок, счётчики попыток по уровням и звуковой сигнал успеха — в одном меню **`/mt`**.
 
-| Файл / папка | Назначение |
-|---|---|
-| `autozatochka.lua` | Основной скрипт |
-| `arizona-events/` | Патченная библиотека Arizona CEF/packets |
-| `applepay.mp3` | Звук успешной заточки |
-| `version.json` | Версия для автообновления |
+<a id="install"></a>
 
-## Версия
+## Установка за три шага
 
-Текущая: **1.26**
+**1. Подготовь игру.** Нужны **MoonLoader**, **SAMPFUNCS**, **mimgui**, **SAMP.Lua** и стандартные библиотеки твоей сборки MoonLoader. [Подробнее о зависимостях ↓](#dependencies)
+
+**2. Скачай [готовый комплект](https://github.com/andergr0ynd/zatochka/releases/latest/download/AutoZatochka.zip)** и распакуй его содержимое **в папку `moonloader`**, сохраняя вложенные папки:
+
+```text
+moonloader/
+├── autozatochka.lua
+├── lib/
+│   ├── arizona-cef-dialogs.lua
+│   └── arizona-events/
+│       ├── init.lua
+│       ├── core.lua
+│       ├── bitstream.lua
+│       └── subprocess.lua
+└── autozatochka/
+    └── applepay.mp3
+```
+
+**3. Зайди в игру и введи `/mt`.** Если игра уже запущена, сначала перезагрузи скрипты.
+
+> [!IMPORTANT]
+> Устанавливай **одну копию** автозаточки. Перед заменой файла убери старую копию из `moonloader`, даже если она называется иначе.
+
+<details>
+<summary><strong>У меня уже стоят библиотеки — можно скачать только Lua?</strong></summary>
+
+Да. Скачай [autozatochka.lua](https://github.com/andergr0ynd/zatochka/releases/latest/download/autozatochka.lua), положи его в `moonloader` и перезагрузи скрипты.
+
+В опубликованной версии **1.26** недостающие `arizona-events` скачиваются автоматически, после чего скрипт перезапускается. Звук также может загрузиться автоматически. **`arizona-cef-dialogs.lua` в этой версии автоматически не устанавливается** — готовый комплект уже содержит её, а для ручной установки файл лежит в [lib](lib).
+
+</details>
+
+<a id="start"></a>
+
+## Первый запуск
+
+1. Открой нужную мастерскую **в игре** и подготовь предмет и ресурсы.
+2. Введи **`/mt`** и выбери соответствующий раздел.
+3. Для одежды или оружия укажи нужную категорию предмета.
+4. Выбери целевой уровень кнопкой **`+N`**. Скрипт начнёт работу, если доступны нужный интерфейс и ресурсы.
+5. Следи за текущим уровнем, доступными ресурсами и счётчиком попыток в меню.
+
+**Остановить заточку:** повторно нажми выбранный уровень или кнопку **«Назад»** в рабочем разделе.
+
+> [!NOTE]
+> `/mt` открывает и скрывает меню. Чтобы остановить процесс, используй выбор уровня или «Назад», а не только закрытие окна.
+
+<a id="modes"></a>
+
+## Какой раздел выбрать
+
+| Раздел в `/mt` | Действие |
+| :--- | :--- |
+| **Мастерская одежды → Аксессуары** | Подготовь аксессуар и выбери нужный уровень |
+| **Мастерская одежды → Скины** | Подготовь скин и выбери нужный уровень |
+| **Мастерская одежды → Бронежилеты** | Подготовь бронежилет и ресурс для его заточки |
+| **Магазин оружия → Скины на оружие** | Используй соответствующий раздел оружейного магазина |
+| **Магазин оружия → Обвесы** | Подготовь обвес и нужные ресурсы |
+| **Эликсир мастер** | Подготовь карты в инвентаре справа; на попытку нужны две карты |
+
+Таблица описывает опубликованную версию **1.26**. Ресурсы и условия улучшения определяются игровым интерфейсом; во время работы их количество показывается в меню скрипта.
+
+<a id="faq"></a>
+
+## Частые вопросы
+
+<details>
+<summary><strong>Меню не открывается по /mt</strong></summary>
+
+Проверь, что файл находится в `moonloader`, установлены MoonLoader и mimgui, а старая копия скрипта удалена. Перезагрузи скрипты и посмотри `moonloader.log`: ошибка загрузки обычно указывает на отсутствующий модуль.
+
+</details>
+
+<details>
+<summary><strong>Меню есть, но заточка не начинается</strong></summary>
+
+Проверь, что открыт нужный игровой раздел, выбран подходящий режим и целевой уровень, а предмет и ресурсы доступны. Для карт нужны две подходящие карты в инвентаре справа.
+
+Если сообщение указывает на отсутствующие `arizona-events`, дождись скачивания и перезапуска. При неудачной загрузке используй библиотеки из готового комплекта.
+
+Для обращения за помощью укажи версию, мастерскую, предмет, выбранный уровень и текст сообщения или ошибки.
+
+</details>
+
+<details>
+<summary><strong>Где должен лежать звук?</strong></summary>
+
+Файл называется **`applepay.mp3`** и находится по пути:
+
+```text
+moonloader/autozatochka/applepay.mp3
+```
+
+Он включён в готовый комплект и доступен [отдельным файлом](https://github.com/andergr0ynd/zatochka/releases/latest/download/applepay.mp3). Скрипт также пытается скачать отсутствующий звук при запуске. Звук используется для сигнала успешной заточки.
+
+</details>
+
+<details>
+<summary><strong>Как обновить скрипт?</strong></summary>
+
+Останови заточку, скачай актуальный `autozatochka.lua`, замени файл в `moonloader` и перезагрузи скрипты. Не оставляй рядом старую версию под другим именем.
+
+Автоматическая докачка библиотек и звука не означает обновление самого Lua-файла.
+
+</details>
+
+<a id="dependencies"></a>
+
+<details>
+<summary><strong>Библиотеки и файлы проекта</strong></summary>
+
+**Устанавливаются заранее:** MoonLoader, SAMPFUNCS, [mimgui](https://github.com/THE-FYP/mimgui), [SAMP.Lua](https://github.com/THE-FYP/SAMP.Lua) и стандартные библиотеки сборки. Упоминание SAMP.Lua означает папку `samp`, в том числе модуль `samp.events`.
+
+**Есть в готовом комплекте:** `arizona-cef-dialogs.lua`, четыре файла `arizona-events` и `applepay.mp3`. При ручной установке библиотеки из [lib](lib) помещаются в `moonloader/lib`.
+
+**Содержимое репозитория:**
+
+| Файл или папка | Назначение |
+| :--- | :--- |
+| [autozatochka.lua](autozatochka.lua) | Опубликованный скрипт |
+| [lib](lib) | Библиотеки в структуре MoonLoader |
+| [arizona-events](arizona-events) | Путь для загрузчика выпущенной версии; сохранён для совместимости |
+| [applepay.mp3](applepay.mp3) | Звук успешной заточки |
+| [version.json](version.json) | Информация о версии и адрес скрипта |
+
+Автор `arizona-cef-dialogs` — **XRLM**; заголовок исходной библиотеки сохранён.
+
+</details>
+
+---
+
+### Нужна помощь или нашёл ошибку?
+
+[**Сообщить об ошибке →**](https://github.com/andergr0ynd/zatochka/issues/new?template=bug_report.yml) · [Тема на Blast.hk](https://www.blast.hk/threads/257714/) · [Скачать комплект](https://github.com/andergr0ynd/zatochka/releases/latest/download/AutoZatochka.zip)
+
+<sub>AutoZatochka для Arizona RP · Автор — andergr0ynd.</sub>

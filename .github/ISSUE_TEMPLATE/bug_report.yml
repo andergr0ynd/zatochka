@@ -1,0 +1,41 @@
+name: Ошибка в AutoZatochka
+description: Проблема с запуском, библиотеками или заточкой
+title: "[Ошибка] "
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Версия скрипта
+      placeholder: Номер версии из меню
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: Сервер
+    validations:
+      required: true
+  - type: dropdown
+    id: workshop
+    attributes:
+      label: Раздел
+      options:
+        - Установка или запуск
+        - Мастерская одежды
+        - Магазин оружия
+        - Эликсир мастер
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Как повторить проблему?
+      description: Укажи предмет, целевой уровень, действия и что получилось.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Ошибка или сообщение
+      description: Вставь текст сообщения в игре или ошибки из moonloader.log.
+      render: text
