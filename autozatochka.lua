@@ -2,7 +2,7 @@
     Автозаточка Arizona (CEF). Команда /mt
 ]]
 script_name('AutoZatochka')
-script_version('1.26')
+script_version('1.38')
 script_author('andergr0ynd')
 script_description('Автозаточка Arizona: одежда, оружие, Эликсир мастер (карты)')
 
@@ -13,7 +13,7 @@ local ok_imgui, imgui = pcall(require, 'mimgui')
 if not ok_imgui then
     function main()
         while not isSampAvailable() do wait(100) end
-        sampAddChatMessage(u8:decode('[AutoZatochka] Нужен mimgui'), -1)
+        sampAddChatMessage('[AutoZatochka] mimgui is required', -1)
     end
     return
 end
@@ -24,8 +24,157 @@ encoding.default = 'CP1251'
 local u8 = encoding.UTF8
 local new = imgui.new
 
--- Arizona CEF: подключается в main() после проверки файлов (см. bootstrap библиотек)
-local arizona = nil
+-- Определение типов предметов встроено в основной скрипт.
+local itemDatabase = (function()
+-- Read item kinds from the installed Arizona client database. No ID ranges.
+local M = {}
+local function readItemsData(path, isZip)
+    local file, err = io.open(path, 'rb')
+    if not file then return nil, err end
+    local ok, result = pcall(function()
+        if not isZip then return assert(file:read('*a')) end
+        local size = assert(file:seek('end'))
+        local tailSize = math.min(size, 65557)
+        assert(file:seek('set', size - tailSize))
+        local tail = assert(file:read(tailSize))
+        local function u16(s, p)
+            local a, b = s:byte(p, p + 1)
+            assert(b, 'Truncated ZIP header')
+            return a + b * 256
+        end
+        local function u32(s, p)
+            return u16(s, p) + u16(s, p + 2) * 65536
+        end
+        local eocd
+        for p = #tail - 21, 1, -1 do
+            if tail:sub(p, p + 3) == 'PK\005\006'
+                and p + 21 + u16(tail, p + 20) == #tail then
+                eocd = p
+                break
+            end
+        end
+        assert(eocd, 'ZIP directory not found')
+        assert(u16(tail, eocd + 4) == 0 and u16(tail, eocd + 6) == 0,
+            'Multipart ZIP is unsupported')
+        local count = u16(tail, eocd + 10)
+        local offset = u32(tail, eocd + 16)
+        assert(count < 65535 and offset < 4294967295, 'ZIP64 is unsupported')
+        assert(file:seek('set', offset))
+        for i = 1, count do
+            local header = assert(file:read(46))
+            assert(#header == 46 and header:sub(1, 4) == 'PK\001\002', 'Invalid ZIP directory')
+            local nameLen = u16(header, 29)
+            local name = assert(file:read(nameLen))
+            if name:gsub('\\', '/'):lower() == 'items.bin' then
+                assert(u16(header, 9) % 2 == 0, 'Encrypted items.bin is unsupported')
+                local method = u16(header, 11)
+                local packed, unpacked = u32(header, 21), u32(header, 25)
+                assert(packed <= 64 * 1024 * 1024 and unpacked <= 64 * 1024 * 1024,
+                    'items.bin exceeds 64 MiB')
+                assert(file:seek('set', u32(header, 43)))
+                local localHeader = assert(file:read(30))
+                assert(#localHeader == 30 and localHeader:sub(1, 4) == 'PK\003\004', 'Invalid ZIP entry')
+                assert(file:seek('cur', u16(localHeader, 27) + u16(localHeader, 29)))
+                local data = assert(file:read(packed))
+                assert(#data == packed, 'Truncated items.bin in ZIP')
+                if method == 0 then
+                    assert(packed == unpacked, 'Invalid items.bin size')
+                    return data
+                end
+                -- Existing Arizona archive uses method 0. For other archives,
+                -- place an extracted items.bin next to this script.
+                error('ZIP compression method ' .. method .. ': extract items.bin next to the script')
+            end
+            assert(file:seek('cur', u16(header, 31) + u16(header, 33)))
+        end
+        error('items.bin not found inside ZIP')
+    end)
+    file:close()
+    if not ok then return nil, tostring(result) end
+    return result
+end
+
+local function parseItems(data)
+    local pos, size = 5, #data
+    local function check(n)
+        assert(pos + n - 1 <= size, 'Unexpected EOF at ' .. pos)
+    end
+    local function skip(n)
+        check(n)
+        pos = pos + n
+    end
+    local function readU8()
+        check(1)
+        local v = data:byte(pos)
+        pos = pos + 1
+        return v
+    end
+    local function readU16()
+        check(2)
+        local a, b = data:byte(pos, pos + 1)
+        pos = pos + 2
+        return a + b * 256
+    end
+    local function readString16()
+        local n = readU16()
+        check(n)
+        local s = data:sub(pos, pos + n - 1)
+        pos = pos + n
+        return s
+    end
+    assert(data:sub(1, 4) == 'ITM2', 'Unsupported items.bin format (expected ITM2)')
+    for i = 1, readU8() do skip(readU8()) end
+    local count = readU16()
+    readU16() -- maxIndex
+    local result = {}
+    for i = 1, count do
+        local id = readU16()
+        readU16() -- index; item ID is the lookup key
+        local name = readString16()
+        skip(readU16()) -- description
+        check(13)
+        local itemType, equipSlot = data:byte(pos), data:byte(pos + 2)
+        local patch = itemType == 22 and name:match('^Нашивка на аксессуар%s*%(') ~= nil
+        local kind
+        if itemType == 78 then kind = 1
+        elseif itemType == 79 then kind = 2
+        elseif itemType == 10 then kind = 3
+        elseif itemType == 6 and equipSlot == 9 then kind = 4
+        elseif itemType == 3 or patch then kind = 0 end
+        skip(13)
+        skip(readU16()) -- extra
+        skip(4) -- D0, D1, D4, D3
+        for group = 1, 3 do skip(readU8() * 2) end
+        assert(result[id] == nil, 'Duplicate item ID: ' .. id)
+        result[id] = {name=name, kind=kind, itemType=itemType, equipSlot=equipSlot, patch=patch}
+    end
+    assert(pos == size + 1, 'Unexpected trailing data in items.bin')
+    return result
+end
+
+
+M.parse = parseItems
+function M.load(root)
+    local paths = {
+        {root .. '/items.bin', false},
+        {root .. '/../items.bin', false},
+        {root .. '/../arizona/items.bin', false},
+        {root .. '/../arizona/items.zip', true},
+        {root .. '/../items.zip', true},
+    }
+    local errors = {}
+    for _, candidate in ipairs(paths) do
+        local data, err = readItemsData(candidate[1], candidate[2])
+        if data then
+            local ok, items = pcall(parseItems, data)
+            if ok then return items end
+            errors[#errors+1] = tostring(items)
+        end
+    end
+    return nil, table.concat(errors, '; ')
+end
+return M
+end)()
 
 -- == Settings == --
 local WinState, playSound, SetWin = new.bool(), new.bool(), new.bool()
@@ -39,6 +188,11 @@ local RAW_GH_BASE = 'https://raw.githubusercontent.com/andergr0ynd/zatochka/refs
 local SOUND_FILENAME = 'applepay.mp3'
 local SOUND_SUBDIR = 'autozatochka'
 local success_sound_stream = nil
+
+local function nowSeconds()
+    if type(getGameTimer) == 'function' then return getGameTimer() / 1000 end
+    return os.time()
+end
 
 local function ensureDirForFile(path)
     local dir = path:match('^(.*\\)[^\\]+$')
@@ -75,7 +229,7 @@ end
 local function downloadViaRequests(url, path, timeout_sec)
     local ok_req, requests = pcall(require, 'requests')
     if not ok_req or not requests or not requests.get then return false end
-    local bust = url .. (url:find('?', 1, true) and '&' or '?') .. 't=' .. tostring(os.clock())
+    local bust = url .. (url:find('?', 1, true) and '&' or '?') .. 't=' .. tostring(nowSeconds())
     local ok, resp = pcall(requests.get, bust, {
         timeout = timeout_sec or 30,
         allow_redirects = true,
@@ -92,7 +246,7 @@ local function downloadViaMoonLoader(url, path, timeout_sec)
     local ml_ok, ml = pcall(require, 'moonloader')
     if not ml_ok or not ml or not ml.download_status then return false end
     local d = ml.download_status
-    local bust = url .. (url:find('?', 1, true) and '&' or '?') .. 't=' .. tostring(os.clock())
+    local bust = url .. (url:find('?', 1, true) and '&' or '?') .. 't=' .. tostring(nowSeconds())
     local done, success = false, false
     downloadUrlToFile(bust, path, function(_, status)
         if status == d.STATUSEX_ENDDOWNLOAD or status == d.STATUS_ENDDOWNLOADDATA then
@@ -100,8 +254,8 @@ local function downloadViaMoonLoader(url, path, timeout_sec)
             success = true
         end
     end)
-    local t0 = os.clock()
-    while not done and os.clock() - t0 < (timeout_sec or 45) do wait(50) end
+    local t0 = nowSeconds()
+    while not done and nowSeconds() - t0 < (timeout_sec or 45) do wait(50) end
     if not success or not doesFileExist(path) then return false end
     wait(200)
     return not contentLooksLikeHtml(readFileHead(path, 128))
@@ -140,12 +294,13 @@ end
 
 local as_action = require('moonloader').audiostream_state
 
-if not decodeJson then
+local decodeJson = decodeJson
+-- The bundled pure Lua decoder accepts root arrays without native cjson quirks.
+do
     local ok, j = pcall(require, 'json')
     if ok and j and j.decode then decodeJson = j.decode end
 end
-if type(decodeJson) == 'function' and not _G.__azJsonWrapped then
-    _G.__azJsonWrapped = true
+if type(decodeJson) == 'function' then
     local rawDecodeJson = decodeJson
     decodeJson = function(s)
         if type(s) ~= 'string' then return nil end
@@ -170,25 +325,12 @@ if type(decodeJson) == 'function' and not _G.__azJsonWrapped then
 end
 
 
-local function safeDecodeJson(raw)
-    if type(raw) ~= 'string' or not decodeJson then return false, nil end
-    local s = raw:gsub('^%s+', ''):gsub('%s+$', '')
-    if s == '' or s == 'null' then return false, nil end
-    if s:sub(1, 1) ~= '{' then return false, nil end
-    local ok, data = pcall(decodeJson, s)
-    if not ok or data == nil then return false, nil end
-    return true, data
-end
-
+local eventOf
 local incomingCef, incomingChat = {}, {}
 local function queueCef(str)
     if type(str) ~= 'string' or str == '' then return end
-    if str:find('playerInventory', 1, true) then
-        pcall(parsePlayerInventory, str)
-        return
-    end
     if str:find('event.storage', 1, true) then return end
-    local keep = str:find('workShop', 1, true)
+    local keep = str:find('playerInventory', 1, true) or str:find('workShop', 1, true)
         or str:find('setWorkshop', 1, true)
         or str:find('setResourceNeedItems', 1, true)
         or str:find('updateEnchantSlots', 1, true)
@@ -196,77 +338,12 @@ local function queueCef(str)
         or str:find('startEnchant', 1, true)
     if not keep then return end
     incomingCef[#incomingCef + 1] = str .. ''
-    if #incomingCef > 40 then table.remove(incomingCef, 1) end
+    if #incomingCef > 2048 then table.remove(incomingCef, 1) end
 end
 local function queueChat(text)
     if type(text) ~= 'string' or text == '' then return end
     incomingChat[#incomingChat + 1] = text .. ''
     if #incomingChat > 40 then table.remove(incomingChat, 1) end
-end
-
--- Синхронизация lib/arizona-events с GitHub -> moonloader\lib\arizona-events
--- Источник на GitHub: zatochka/arizona-events/*.lua (raw). На диск: moonloader\lib\arizona-events\
--- Если файлов нет или они битые — скрипт качает, перезагружается, затем продолжает работу.
-local LIB_ARIZONA_EVENTS_DIR = 'lib\\arizona-events'
-local LIB_ARIZONA_EVENTS_FILES = { 'init.lua', 'core.lua', 'bitstream.lua', 'subprocess.lua' }
-
-local function libFileLooksBad(path)
-    local f = io.open(path, 'rb')
-    if not f then return true end
-    local s = f:read('*a') or ''
-    f:close()
-    if #s < 32 then return true end
-    return contentLooksLikeHtml(s)
-end
-
-local function arizonaEventsLibPaths()
-    local root = getWorkingDirectory()
-    local dir = root .. '\\' .. LIB_ARIZONA_EVENTS_DIR
-    return root, dir
-end
-
--- У части пользователей нет папки lib\arizona-events — создаём lib и вложенную arizona-events отдельно
-local function ensureArizonaEventsLibDir()
-    local root, dir = arizonaEventsLibPaths()
-    local libDir = root .. '\\lib'
-    if not doesDirectoryExist(libDir) then
-        createDirectory(libDir)
-    end
-    if not doesDirectoryExist(dir) then
-        createDirectory(dir)
-    end
-end
-
-local function arizonaEventsLibPresent()
-    local _, dir = arizonaEventsLibPaths()
-    for _, name in ipairs(LIB_ARIZONA_EVENTS_FILES) do
-        local path = dir .. '\\' .. name
-        if not doesFileExist(path) or libFileLooksBad(path) then
-            return false
-        end
-    end
-    return true
-end
-
--- force_all: скачать все файлы заново (первый запуск / восстановление)
--- возвращает true, если после операции все четыре файла на месте и валидны
-local function syncArizonaEventsLib(force_all)
-    ensureArizonaEventsLibDir()
-    local _, dir = arizonaEventsLibPaths()
-    local all_ok = true
-    for _, name in ipairs(LIB_ARIZONA_EVENTS_FILES) do
-        local path = dir .. '\\' .. name
-        local need = force_all or not doesFileExist(path) or libFileLooksBad(path)
-        if need then
-            local rel = 'arizona-events/' .. name
-            local ok = downloadToFileMirrors(mirrorUrlsFor(rel), path, 45)
-            if not ok or libFileLooksBad(path) then
-                all_ok = false
-                if doesFileExist(path) then pcall(os.remove, path) end
-            end
-        end
-    end
-    return all_ok and arizonaEventsLibPresent()
 end
 
 -- Stone
@@ -402,88 +479,88 @@ function ws.noteTd(id, td)
 end
 
 -- Эликсир мастер: слоты верстака + карты из инвентаря справа (x>=310)
-function ws.noteCardTd(id, td, x, y, text)
-    id = tonumber(id) or -1
-    x, y = tonumber(x), tonumber(y)
-    if not x or not y or id < 0 then return end
-    local model = tonumber(td.modelId or td.model or td.modelID) or 0
-    local sel = td.selectable
-    if sel == nil then sel = td.selectAble end
-    if sel == true then sel = 1 elseif sel == false then sel = 0 else sel = tonumber(sel) or 0 end
+-- Keep models and text labels separate: either RPC may arrive first.
+function ws.rebuildCards()
     local c = ws.card
-
-    if nearPos(x, y, 168.03, 182.28, 4) then
-        c.leftTd = id
-        c.leftFilled = (model == 19168)
-        c.open = true
-        c.seenAt = os.clock()
-    elseif nearPos(x, y, 261.37, 193.28, 4) then
-        c.rightTd = id
-        c.rightFilled = (model == 19168)
-        c.open = true
-        c.seenAt = os.clock()
-    elseif nearPos(x, y, 185.66, 258.65, 4) then
-        c.improveTd = id
-        c.improveReady = (sel == 1)
-        c.open = true
-        c.seenAt = os.clock()
-    elseif nearPos(x, y, 163.26, 245.38, 4) then
-        c.open = true
-        c.seenAt = os.clock()
-    end
-
-    -- Инвентарь карт только справа
-    if x >= CARD_INV_MIN_X and model == 19168 then
-        local invSlot = ws.slotFromTd(x, y)
-        if invSlot == nil then
-            invSlot = 'p:' .. tostring(math.floor(x * 10)) .. ':' .. tostring(math.floor(y * 10))
-        end
-        local prev = c.inv[invSlot] or {}
-        c.inv[invSlot] = {
-            id = id,
-            level = tonumber(prev.level) or -1,
-            sel = sel,
-            x = x,
-            at = os.clock(),
-        }
-        c.open = true
-        c.seenAt = os.clock()
-    elseif x >= CARD_INV_MIN_X and (model == 1649 or model == 0) then
-        local invSlot = ws.slotFromTd(x, y)
-        if invSlot and c.inv[invSlot] then c.inv[invSlot] = nil end
-    end
-
-    local lvl = tonumber(text:match('LEVEL:(%d+)')) or tonumber(text:match('~w~~n~LEVEL:(%d+)'))
-    if lvl and x >= CARD_INV_MIN_X then
-        local bestSlot, bestD = nil, 1e9
-        for col = 1, 6 do
-            for row = 1, 6 do
-                local sx, sy = INV_XS[col], INV_YS[row]
-                local dx, dy = x - sx, y - sy
-                if dx > -5 and dx < 40 and dy > -5 and dy < 30 then
-                    local d = dx * dx + dy * dy
-                    if d < bestD then
-                        bestD = d
-                        bestSlot = (row - 1) * 6 + (col - 1)
-                    end
-                end
+    local visible = c.visible or {}
+    local old = c.inv or {}
+    local inv, labels = {}, {}
+    c.leftTd, c.rightTd, c.improveTd = -1, -1, -1
+    c.leftFilled, c.rightFilled, c.improveReady = false, false, false
+    c.leftLevel, c.rightLevel = nil, nil
+    for id, td in pairs(visible) do
+        local x, y = td.x, td.y
+        local text = tostring(td.text or ''):gsub('~[^~]*~', '')
+        local level = tonumber(text:upper():match('LEVEL%s*:%s*(%d+)'))
+        local slotLevel = tonumber(text:match('%+%s*(%d+)'))
+        if slotLevel and nearPos(x,y,171.13,245.136,3) then c.leftLevel = slotLevel end
+        if slotLevel and nearPos(x,y,291.87,245.136,3) then c.rightLevel = slotLevel end
+        if level then labels[#labels + 1] = {id=id, x=x, y=y, level=level} end
+        -- Do not let a text overlay replace a model occupying the same position.
+        if td.model == 19168 or td.style == 5 then
+            if nearPos(x,y,168.03,182.28,4) then
+                c.leftTd, c.leftFilled = id, td.model == 19168
+            elseif nearPos(x,y,261.37,193.28,4) then
+                c.rightTd, c.rightFilled = id, td.model == 19168
             end
         end
-        if bestSlot ~= nil then
-            local prev = c.inv[bestSlot] or {}
-            if (tonumber(prev.id) or -1) >= 0 then
-                prev.level = lvl
-                prev.at = os.clock()
-                c.inv[bestSlot] = prev
+        if td.style ~= 5 and nearPos(x,y,185.66,258.65,4) then
+            c.improveTd, c.improveReady = id, td.sel == 1
+        end
+        if td.model == 19168 and x >= CARD_INV_MIN_X and x <= 510 and y >= 140 and y <= 350 then
+            -- Key by actual textdraw, not a floating point coordinate string.
+            local previous = old[id]
+            inv[id] = {id=id, model=td.model, level=-1, sel=td.sel, x=x, y=y, at=td.at}
+            if previous and previous.x == x and previous.y == y then
+                inv[id].used = previous.used
             end
         end
-    elseif lvl and c.leftFilled and nearPos(x, y, 168.03, 182.28, 50) then
-        ws.itemEnchant = lvl
     end
+    -- Match each level label to one card. Text labels must never remove models.
+    for _, label in ipairs(labels) do
+        local best, distance = nil, math.huge
+        for _, info in pairs(inv) do
+            local dx, dy = label.x-info.x, label.y-info.y
+            -- Real LEVEL labels sit 24.5px to the right of a card; the next
+            -- column is 26.5px away. Match inside the cell, not nearest model.
+            if dx >= 0 and dx < 26.5 and dy >= 0 and dy < 30.5 then
+                local d = dx*dx + dy*dy
+                if d < distance then best, distance = info, d end
+            end
+        end
+        if best then best.level = label.level; best.labelId = label.id end
+        if c.leftFilled and nearPos(label.x,label.y,168.03,182.28,24) then
+            ws.itemEnchant = label.level
+        end
+    end
+    c.inv = inv
+    -- Inventory alone does not mean that the card workshop is open.
+    c.open = c.leftTd >= 0 and c.rightTd >= 0 and c.improveTd >= 0
+    if c.leftFilled and c.leftLevel then ws.itemEnchant = c.leftLevel end
+end
 
-    if c.open and not ws.busy and not c.waitingChat and (os.clock() - (tonumber(c.seenAt) or 0)) > 15 then
-        c.open = false
-    end
+function ws.noteCardTd(id, td, x, y, text)
+    id, x, y = tonumber(id), tonumber(x), tonumber(y)
+    if not id or not x or not y then return end
+    local c = ws.card
+    c.visible = c.visible or {}
+    local selectable = td.selectable
+    if selectable == nil then selectable = td.selectAble end
+    c.visible[id] = {x=x,y=y,text=text,model=tonumber(td.modelId or td.model or td.modelID) or 0,
+        style=tonumber(td.style), sel=(selectable == true or tonumber(selectable) == 1) and 1 or 0,
+        at=nowSeconds()}
+    ws.rebuildCards()
+end
+
+function ws.cardTextChanged(id, text)
+    local td = ws.card.visible and ws.card.visible[id]
+    if td then td.text = text; td.at = nowSeconds(); ws.rebuildCards() end
+end
+
+function ws.cardTdHidden(id)
+    if ws.card.visible then ws.card.visible[id] = nil end
+    for slot, tid in pairs(ws.invTd) do if tid == id then ws.invTd[slot] = nil end end
+    ws.rebuildCards()
 end
 
 function ws.isCard()
@@ -492,14 +569,15 @@ end
 
 function ws.cardCount(maxLvl)
     maxLvl = tonumber(maxLvl) or 99
+    if maxLvl <= 0 then maxLvl = 99 end
     local n = 0
     for _, info in pairs(ws.card.inv or {}) do
         local lv = tonumber(info.level)
-        if lv == nil or lv < 0 then lv = 0 end
+        if lv == nil then lv = -1 end
         local sel = tonumber(info.sel) or 0
         local tid = tonumber(info.id) or -1
         local ix = tonumber(info.x) or 0
-        if tid >= 0 and sel == 1 and ix >= CARD_INV_MIN_X and lv < maxLvl then
+        if lv >= 0 and not info.used and tid >= 0 and sel == 1 and ix >= CARD_INV_MIN_X and lv < maxLvl then
             n = n + 1
         end
     end
@@ -518,13 +596,19 @@ function ws.pickInvCard(target)
     }
     for slot, info in pairs(c.inv or {}) do
         local lv = tonumber(info.level)
-        if lv == nil or lv < 0 then lv = 0 end
+        if lv == nil then lv = -1 end
         local sel = tonumber(info.sel) or 0
         local tid = tonumber(info.id) or -1
         local ix = tonumber(info.x) or 0
-        if tid >= 0 and sel == 1 and ix >= CARD_INV_MIN_X and not ban[tid] and (target <= 0 or lv < target) then
+        if lv >= 0 and not info.used and tid >= 0 and sel == 1 and ix >= CARD_INV_MIN_X and not ban[tid] and (target <= 0 or lv < target) then
             list[#list + 1] = { slot = slot, id = tid, level = lv }
         end
+    end
+    if c.placed == 1 then
+        for _, item in ipairs(list) do
+            if item.level == c.pairLevel then return item end
+        end
+        return nil, nil
     end
     table.sort(list, function(a, b)
         if a.level ~= b.level then return a.level > b.level end
@@ -538,13 +622,13 @@ function ws.pickInvCard(target)
             end
         end
     end
-    return list[1], list[2]
+    return nil, nil
 end
 
 function ws.clickTd(id)
     id = tonumber(id) or -1
     if id < 0 or type(sampSendClickTextdraw) ~= 'function' then return false end
-    local now = os.clock()
+    local now = nowSeconds()
     if (now - (tonumber(ws.card.lastClickAt) or 0)) < 0.4 then return false end
     ws.card.lastClickAt = now
     ws.card.seenAt = now
@@ -555,9 +639,11 @@ end
 function ws.cardReady()
     local c = ws.card
     if c.waitingChat or ws.busy then return false end
-    -- rightFilled не доверяем (фантом на правом слоте) — только 2 клика из инвентаря + Улучшить
+    if nowSeconds() - (c.resultAt or -10) < 0.8 then return false end
+    -- Both populated server slots take precedence over our local click counter.
+    -- The server disables inventory cards once they are selected (sel=0).
     return c.open
-        and (tonumber(c.placed) or 0) >= 2
+        and c.leftFilled and c.rightFilled
         and c.improveReady
         and (tonumber(c.improveTd) or -1) >= 0
 end
@@ -566,6 +652,7 @@ end
 function ws.placeCards()
     local c = ws.card
     if not c.open or c.waitingChat or ws.busy then return false end
+    if nowSeconds() - (c.resultAt or -10) < 0.8 then return false end
     if ws.cardReady() then return true end
     local target = tonumber(max_toch) or 0
     if target > 3 then target = 3 end
@@ -578,27 +665,18 @@ function ws.placeCards()
     if not a then
         if not ws.lowMatSaid then
             ws.lowMatSaid = true
-            sampAddChatMessage(u8:decode('[AutoZatochka] Нужны 2 карты в инвентаре справа'), 0xFF3333)
+            sampAddChatMessage(u8:decode('[AutoZatochka] Не найдены две доступные карты одного уровня.'), 0xFF3333)
         end
         return false
     end
     local pick = a
-    if placed == 1 then
-        pick = b
-        if not pick then
-            a, b = ws.pickInvCard(target)
-            pick = a
-        end
-        if not pick then
-            if not ws.lowMatSaid then
-                ws.lowMatSaid = true
-                sampAddChatMessage(u8:decode('[AutoZatochka] Нужна ещё 1 карта в инвентаре'), 0xFF3333)
-            end
-            return false
-        end
+    if placed == 0 then
+        if not b then return false end
+        c.pairLevel = a.level
     end
+
     if ws.clickTd(pick.id) then
-        if c.inv[pick.slot] then c.inv[pick.slot].sel = 0 end
+        if c.inv[pick.slot] then c.inv[pick.slot].used = true end
         c.placed = placed + 1
         c.step = (c.placed == 1) and 'waitLeft' or 'waitRight'
     end
@@ -608,62 +686,55 @@ end
 function ws.startCardEnchant()
     local c = ws.card
     if not ws.cardReady() then return false end
+    local target = tonumber(max_toch) or 0
+    if target > 0 and c.leftLevel and c.leftLevel >= target then
+        status = false
+        max_toch = 0
+        sampAddChatMessage(u8:decode('[AutoZatochka] Карта уже достигла выбранного уровня.'), -1)
+        return false
+    end
     if not ws.clickTd(c.improveTd) then return false end
     c.step = 'busy'
     c.placed = 0
     ws.busy = true
-    ws.busyAt = os.clock()
+    ws.busyAt = nowSeconds()
     c.waitingChat = true
     return true
 end
 
-function ws.clickOnBlock(slot, typ)
-    slot = tonumber(slot) or -1
-    if slot < 0 then return end
-    sendCEF(string.format('clickOnBlock|{"slot": %d, "type": %d}', slot, typ or 1))
-end
-
-local function itemsFromInventory(data)
-    if type(data) ~= 'table' then return nil end
-    local items
-    if type(data[1]) == 'table' and type(data[1].data) == 'table' then
-        items = data[1].data.items
-    elseif type(data.data) == 'table' then
-        items = data.data.items
-    else
-        items = data.items
-    end
-    if type(items) ~= 'table' then return nil end
-    if items[1] ~= nil then return items end
-    local list = {}
-    for _, item in pairs(items) do
-        if type(item) == 'table' then
-            list[#list + 1] = item
-        end
-    end
-    return list
-end
-
 function parsePlayerInventory(str)
-    if type(str) ~= 'string' or not str:find('playerInventory', 1, true) then return end
-    local payload = str:match("window%.executeEvent%(%s*'[^']+'%s*,%s*`([^`]+)`")
-        or str:match('playerInventory|(.*)')
-    if not payload or not decodeJson then return end
-    -- action 2 — полный снимок; другие action тоже могут нести слоты с 1420/1187
-    local ok, data = pcall(decodeJson, payload)
-    if not ok then return end
-    local items = itemsFromInventory(data)
-    if not items then return end
-    ws.cefInv = true
-    ws.ingestItems(items, 1)
+    local ev, payload = eventOf(str)
+    if not ev or not ev:find('playerInventory', 1, true) then return end
+    local data = decodeJson(payload)
+    if type(data) ~= 'table' then return end
+    if data[1] ~= nil then
+        for _, message in ipairs(data) do ws.inventoryMessage(message) end
+    else
+        ws.inventoryMessage(data)
+    end
+end
+
+function ws.inventoryMessage(message)
+    if type(message) ~= 'table' or type(message.data) ~= 'table' then return end
+    local data = message.data
+    if tonumber(data.type) ~= 1 then return end
+    if tonumber(message.action) == 2 and type(data.items) == 'table' then
+        ws.cefInv = true
+        ws.ingestItems(data.items, 1)
+    elseif tonumber(message.action) == 1 and data.slot ~= nil then
+        ws.ingestItems({{slot = data.slot, item = 0, amount = 0}}, 1)
+    end
 end
 
 local sendQ = {}
-local function eventOf(str)
-    local ev, payload = str:match("window%.executeEvent%(%s*'([^']+)'%s*,%s*`([^`]*)`")
+eventOf = function(str)
+    local ev, payload = str:match("window%.executeEvent%(%s*'([^']+)'%s*,%s*`(.*)`%s*%)")
     if ev then return ev, payload end
-    return str:match("window%.executeEvent%(%s*'([^']+)'%s*,%s*'([^']*)'")
+    ev, payload = str:match("window%.executeEvent%(%s*'([^']+)'%s*,%s*'(.*)'%s*%)")
+    if ev then return ev, payload end
+    return str:match('^([%w%.]+)|(.*)$')
 end
+
 local function queueSend(s)
     if type(s) ~= 'string' or s == '' then return end
     sendQ[#sendQ + 1] = s .. ''
@@ -765,19 +836,11 @@ end
 -- == CEF функции == --
 function evalanon(code)
     code = tostring(code or '')
-    if arizona and arizona.eval then
-        pcall(arizona.eval, code, 0)
-        return
-    end
     evalcef('(() => {' .. code .. '})()')
 end
 
 function evalcef(code, encoded)
     encoded = encoded or 0
-    if arizona and arizona.eval and encoded == 0 then
-        arizona.eval(code, 0)
-        return
-    end
     local bs = raknetNewBitStream()
     raknetBitStreamWriteInt8(bs, 17)
     raknetBitStreamWriteInt32(bs, 0)
@@ -790,10 +853,6 @@ end
 
 -- == Функции отправки CEF команд == --
 function sendCEF(str)
-    if arizona and arizona.send then
-        local ok = pcall(arizona.send, 'onArizonaSend', { text = str, server_id = 0 })
-        if ok then return end
-    end
     local bs = raknetNewBitStream()
     raknetBitStreamWriteInt8(bs, 220)
     raknetBitStreamWriteInt8(bs, 18)
@@ -804,51 +863,74 @@ function sendCEF(str)
     raknetDeleteBitStream(bs)
 end
 
--- == Отправка события startEnchant == --
-function ws.clickEnchantBtn()
-    local code = [[
-        var needles = ['\u0417\u0430\u0442\u043e\u0447\u0438\u0442\u044c', 'ENCHANT'];
-        var nodes = document.querySelectorAll('button, [role="button"], [class*="button"], [class*="btn"], div, span');
-        var i, j;
-        for (i = 0; i < nodes.length; i++) {
-            var n = nodes[i];
-            var r = n.getBoundingClientRect();
-            if (r.width < 8 || r.height < 8) continue;
-            var t = String(n.innerText || n.textContent || '').replace(/\s+/g, ' ');
-            if (t.length > 80) continue;
-            var hit = false;
-            for (j = 0; j < needles.length; j++) {
-                if (t.indexOf(needles[j]) !== -1) { hit = true; break; }
-            }
-            if (!hit) continue;
-            if (typeof n.click === 'function') n.click();
-            return t;
-        }
-        return 0;
-    ]]
-    return ws.jsQuery(code, 800)
+function startEnchant()
+    if not ws.loopReady() or ws.attempt then return false end
+    if ws.isPatch() then
+        local progress=ws.patchProgress()
+        local target=math.min(3,tonumber(max_toch) or 3)
+        if progress.level>=3 or (target>0 and progress.level>=target) then status=false;max_toch=0;return false end
+        if progress.attempts>=30 then
+            status=false;max_toch=0
+            sampAddChatMessage(u8:decode('[AutoZatochka] Остановка: 30 попыток нашивки. Проверьте её уровень перед продолжением.'),-1)
+            return false
+        end
+    end
+    if not ws.beginAttempt() then return false end
+    sendCEF('startEnchant')
+    return true
 end
 
-function startEnchant()
-    if ws.isPair() and not ws.loopReady() then
-        return
+function ws.beginAttempt()
+    if ws.attempt then return false end
+    local progress=ws.isPatch() and ws.patchProgress()
+    if progress and progress.level>=3 then return false end
+    ws.attempt = { from = progress and progress.level or tonumber(ws.itemEnchant) or -1,
+        slot = enchantSlotsData.index, tab = ws.tab }
+    if progress then progress.attempts=progress.attempts+1 end
+    ws.busy = true
+    ws.busyAt = nowSeconds()
+    ws.available = 0
+    return true
+end
+
+function ws.completeAttempt(success, toLvl)
+    local attempt = ws.attempt
+    if not attempt or attempt.tab ~= ws.tab or attempt.slot ~= enchantSlotsData.index then return end
+    local progress=ws.isPatch() and ws.patchProgress()
+    if progress and success then
+        toLvl=math.min(3,attempt.from+1)
+        progress.level=math.max(progress.level,toLvl)
     end
-    ws.clickEnchantBtn()
-    sendCEF('startEnchant')
+    if success and not toLvl then
+        if attempt.from < 0 then ws.pendingResult = 1; return end
+        toLvl = attempt.from + 1
+    end
+    ws.attempt = nil
+    ws.pendingResult = nil
+    ws.busy = false
+    ws.available = 0
+    ws.resultAt = nowSeconds()
+    if success then
+        ws.itemEnchant = toLvl
+        ws.finishSuccess(attempt.from, toLvl)
+    else
+        ws.statFail()
+    end
 end
 
 -- Разбор updateEnchantSlots: только regex, decodeJson не трогаем
 local function parseEnchantSlotsPayload(jsonData)
     if not jsonData or #jsonData == 0 then return end
     if jsonData:gsub('^%s+', ''):sub(1, 1) == '[' then return end
-    local index = jsonData:match('"index":(%-?%d+)')
-    local left = jsonData:match('"left":(%-?%d+)')
-    local right = jsonData:match('"right":(%-?%d+)')
-    local color = jsonData:match('"color":(%-?%d+)')
+    local index = jsonData:match('"index":%s*(%-?%d+)')
+    local left = jsonData:match('"left":%s*(%-?%d+)')
+    local right = jsonData:match('"right":%s*(%-?%d+)')
+    local color = jsonData:match('"color":%s*(%-?%d+)')
     if index then
         local n = tonumber(index)
         -- Смена предмета в слоте (вставка / снятие) — это не результат заточки.
         if n ~= enchantSlotsData.index then
+            ws.expectedSlots = nil
             ws.pendingResult = nil
             ws.chatHold = nil
             ws.itemEnchant = -1
@@ -856,14 +938,26 @@ local function parseEnchantSlotsPayload(jsonData)
             ws.itemSlot = -1
             ws.leftItemId = nil
             ws.rightItemId = -1
+            if ws.autoShop then ws.leftNeed = 0; ws.rightNeed = 1 end
             -- Новый предмет на станке → снова камень, пока не придёт ошибка про амулет.
             ws.amuletNeed = false
+            ws.attempt = nil
+            ws.busy = false
+            ws.available = 0
+            ws.lastPlaceAt = -10
+            local item = ws.inventory and ws.inventory[n]
+            if item then
+                ws.itemSlot = n
+                ws.itemId = tonumber(item.item) or -1
+                ws.itemEnchant = tonumber(item.enchant) or tonumber(tostring(item.text or ''):match('%+(%d+)')) or -1
+            end
         end
         enchantSlotsData.index = n
     end
     if left then enchantSlotsData.left = tonumber(left) end
     if right then enchantSlotsData.right = tonumber(right) end
     if color then enchantSlotsData.color = tonumber(color) end
+    if ws.autoShop then ws.detectSelectedItem() end
 end
 
 -- Паттерны чата: заточка только по «с +X на +Y»
@@ -930,8 +1024,93 @@ function ws.isCloth()
     return ws.isAcc() or ws.isSkin() or ws.isArmor()
 end
 
+function ws.isPatch()
+    if not ws.isCloth() then return false end
+    ws.ensureItemKinds()
+    local selected = ws.inventory and ws.inventory[tonumber(enchantSlotsData.index)]
+    local id = selected and tonumber(selected.item) or tonumber(ws.itemId)
+    local meta = ws.itemKinds and ws.itemKinds[id]
+    return meta and meta.patch == true or false
+end
+
+function ws.patchReportedLevel(item)
+    if type(item)~='table' then return end
+    -- Ordinary accessory patches store their actual level in unic_id / "3 lvl".
+    -- The enchant field and chat's +0 -> +1 are not their level.
+    local code=tonumber(item.unic_id)
+    local text=tonumber(tostring(item.text or ''):match('(%d+)%s*[lL][vV][lL]'))
+    local level
+    for _,value in pairs({code=code,text=text}) do
+        if value>=1 and value<=3 and value==math.floor(value) then level=math.max(level or 1,value) end
+    end
+    return level
+end
+
+function ws.patchProgress()
+    local slot=tonumber(enchantSlotsData.index)
+    local item=ws.inventory and ws.inventory[slot]
+    local id=item and tonumber(item.item) or tonumber(ws.itemId)
+    ws.patchLevels=ws.patchLevels or {}
+    local progress=ws.patchLevels[slot]
+    local reported=ws.patchReportedLevel(item)
+    if not progress or progress.id~=id then
+        progress={id=id,level=reported or 1,attempts=0}
+        ws.patchLevels[slot]=progress
+    elseif reported and reported>progress.level then
+        progress.level=reported
+    end
+    ws.itemEnchant=progress.level
+    return progress
+end
+
 function ws.isWeaponTab()
     return ws.isGun() or ws.isAttach()
+end
+
+function ws.ensureItemKinds()
+    if ws.itemKinds or ws.itemKindsTried then return end
+    ws.itemKindsTried = true
+    if type(getWorkingDirectory) == 'function' then
+        local items, err = itemDatabase.load(getWorkingDirectory())
+        ws.itemKinds = items
+        if not items then print('[AutoZatochka] Item database unavailable: ' .. tostring(err)) end
+    end
+end
+
+function ws.applyAutoKind(kind)
+    if not ws.autoShop or ws.isCard() or kind == nil then return end
+    local weapon = kind == 1 or kind == 2
+    if weapon ~= (ws.autoShop == 'gun') then return end
+    if tonumber(ws.tab) == kind then return end
+    ws.tab = kind
+    ws.expectedSlots = nil
+    ws.available = 0
+    enchantSlotsData.left, enchantSlotsData.right = -1, -1
+    ws.lastPlaceAt = -10
+    ws.bestStone()
+    ws.bestRes()
+    if max_toch > ws.maxLevel() then max_toch = ws.maxLevel() end
+end
+
+function ws.detectSelectedItem()
+    if not ws.autoShop or ws.isCard() then return end
+    ws.ensureItemKinds()
+    local item = ws.inventory and ws.inventory[tonumber(enchantSlotsData.index)]
+    local id = item and tonumber(item.item) or tonumber(ws.itemId)
+    local meta = ws.itemKinds and ws.itemKinds[id]
+    if meta then
+        ws.applyAutoKind(meta.kind)
+        if meta.patch and ws.autoShop == 'cloth' then ws.setAmuletNeed(true) end
+        if meta.patch and ws.autoShop == 'cloth' then ws.patchProgress() end
+        if max_toch > ws.maxLevel() then max_toch = ws.maxLevel() end
+    end
+end
+
+function ws.detectResourceKind(id)
+    if not ws.autoShop or ws.isCard() then return end
+    if id == GUN_STONE_ID then ws.applyAutoKind(1)
+    elseif id == ATTACH_STONE_ID then ws.applyAutoKind(2)
+    elseif id == ARMOR_STONE_ID then ws.applyAutoKind(4) end
 end
 
 function ws.clothNeedsLeft()
@@ -955,6 +1134,7 @@ function ws.isPair()
 end
 
 function ws.maxLevel()
+    if ws.isPatch() then return 3 end
     if ws.isAttach() then return 5 end
     if ws.isCard() then return 3 end -- карты: максимум +3
     return 12
@@ -966,10 +1146,13 @@ function ws.afterCardResult(isSuccess, fromLvl, toLvl)
     ws.busy = false
     ws.pendingResult = nil
     c.waitingChat = false
-    c.placed = 0 -- всегда заново из инвентаря (правый фантом не считаем)
+    c.placed = 0
+    c.resultAt = nowSeconds()
     c.step = 'idle'
-    c.open = true
-    c.seenAt = os.clock()
+    for _, info in pairs(c.inv) do info.used = nil end
+    ws.rebuildCards()
+    c.open = c.leftTd >= 0 and c.rightTd >= 0 and c.improveTd >= 0
+    c.seenAt = nowSeconds()
     if isSuccess then
         if toLvl then ws.itemEnchant = toLvl end
         queueSuccessSound()
@@ -987,15 +1170,8 @@ function ws.afterCardResult(isSuccess, fromLvl, toLvl)
     end
 end
 
-function ws.applyFail()
-    ws.pendingResult = nil
-    ws.busy = false
-    ws.statFail()
-end
-
 function ws.statFail()
-    local now = os.clock()
-    if (now - (tonumber(ws.statAt) or 0)) < 1.2 then return end
+    local now = nowSeconds()
     ws.statAt = now
     if ws.isGun() then
         ws.gAll = (tonumber(ws.gAll) or 0) + 1
@@ -1019,8 +1195,7 @@ function ws.statFail()
 end
 
 function ws.statOk(toLvl)
-    local now = os.clock()
-    if (now - (tonumber(ws.statAt) or 0)) < 1.2 then return end
+    local now = nowSeconds()
     ws.statAt = now
     if ws.isGun() then
         ws.gLvl = (tonumber(ws.gLvl) or 0) + 1
@@ -1106,11 +1281,7 @@ function ws.clearStats()
 end
 
 function ws.sendCategory()
-    local cat = ws.isWeaponTab() and 6 or 0
-    if ws.isWeaponTab() and ws.gunCtx then
-        ws.lastCat = cat
-        return
-    end
+    local cat = ws.isGun() and 6 or 0
     if ws.lastCat == cat then
         return
     end
@@ -1118,10 +1289,21 @@ function ws.sendCategory()
     sendCEF('updateCategory|{"category": ' .. tostring(cat) .. '}')
 end
 
-function ws.setTab(t)
+function ws.setTab(t, skipCategory)
+    ws.autoShop = nil
     t = tonumber(t) or 0
     if tonumber(ws.tab) == t then return false end
     ws.tab = t
+    ws.expectedSlots = nil
+    ws.attempt = nil
+    ws.busy = false
+    ws.pendingResult = nil
+    ws.available = 0
+    ws.leftNeed = 0
+    ws.rightNeed = 1
+    ws.lastPlaceAt = -10
+    ws.card.waitingChat = false
+    ws.card.placed = 0
     status = false
     max_toch = 0
     ws.lastCat = nil
@@ -1133,10 +1315,10 @@ function ws.setTab(t)
     if not ws.isCard() then
         ws.bestStone()
         ws.bestRes()
-        ws.sendCategory()
+        if not skipCategory then ws.sendCategory() end
     else
         ws.card.step = 'idle'
-        ws.card.inv = {}
+        -- Textdraws may already have arrived before the user picked this mode.
         ws.lowMatSaid = false
     end
     return true
@@ -1145,6 +1327,15 @@ end
 function ws.slotsJson(idx, left, right, color)
     return '{"index":' .. tostring(idx) .. ',"left":' .. tostring(left)
         .. ',"right":' .. tostring(right) .. ',"color":' .. tostring(color) .. '}'
+end
+
+function ws.sendSlots(idx, left, right, color)
+    local json = ws.slotsJson(idx, left, right, color)
+    -- Native injected sends bypass onSendPacket in this MoonLoader build.
+    parseEnchantSlotsPayload(json)
+    ws.expectedSlots = {index=idx, left=left, right=right, color=color}
+    ws.available = 0
+    sendCEF('updateEnchantSlots|' .. json)
 end
 
 function ws.enoughMats()
@@ -1202,6 +1393,7 @@ end
 function ws.setSideItem(side, id)
     id = tonumber(id)
     if not id or not ws.isResourceId(id) then return end
+    if side == 'right' then ws.detectResourceKind(id) end
     -- Правый ресурс камень/амулет только через чат (amuletNeed). CEF/UI не переключают сами.
     if side == 'right' then
         if id == AMULET_ID and not ws.amuletNeed then return end
@@ -1215,10 +1407,14 @@ function ws.setSideItem(side, id)
         if id == tonumber(ws.rightItemId) then return end
         ws.rightItemId = id
         enchantSlotsData.right = -1
+        if ws.autoShop then ws.available = 0; ws.expectedSlots = nil end
     end
 end
 
 function ws.pickRightId()
+    if ws.isPatch() then return AMULET_ID end
+    local explicit = tonumber(ws.rightItemId)
+    if ws.autoShop and explicit and explicit > 0 and ws.isResourceId(explicit) then return explicit end
     if ws.isGun() then return GUN_STONE_ID end
     if ws.isAttach() then return ATTACH_STONE_ID end
     if ws.isArmor() then return ARMOR_STONE_ID end
@@ -1262,11 +1458,11 @@ end
 
 function ws.noteSideId(payload, side)
     local keys = {
-        '"' .. side .. 'ResourceItem":(%d+)',
-        '"' .. side .. 'ItemId":(%d+)',
-        '"' .. side .. 'Item":(%d+)',
-        '"' .. side .. 'ResourceId":(%d+)',
-        '"' .. side .. 'Resource":(%d+)',
+        '"' .. side .. 'ResourceItem":%s*(%d+)',
+        '"' .. side .. 'ItemId":%s*(%d+)',
+        '"' .. side .. 'Item":%s*(%d+)',
+        '"' .. side .. 'ResourceId":%s*(%d+)',
+        '"' .. side .. 'Resource":%s*(%d+)',
     }
     local i
     for i = 1, #keys do
@@ -1283,12 +1479,6 @@ function ws.textHas(payload, needle)
     if payload:find(needle, 1, true) then return true end
     local dec = u8:decode(needle)
     return dec and payload:find(dec, 1, true) ~= nil
-end
-
-function ws.textHasUse(payload, itemName)
-    return ws.textHas(payload, "используйте '" .. itemName .. "'")
-        or ws.textHas(payload, 'используйте "' .. itemName .. '"')
-        or ws.textHas(payload, 'используйте «' .. itemName .. '»')
 end
 
 local function stackTotal(map)
@@ -1325,12 +1515,16 @@ local function clothResError(payload, itemName)
 end
 
 function ws.setAmuletNeed(on)
+    if ws.isPatch() then on = true end
     on = not not on
     local id = on and AMULET_ID or Whetstone_ITEM_ID
     if ws.amuletNeed == on and (tonumber(ws.rightItemId) or -1) == id then
         return false
     end
     ws.amuletNeed = on
+    ws.expectedSlots = nil
+    ws.attempt = nil
+    ws.available = 0
     ws.rightItemId = id
     enchantSlotsData.right = -1
     ws.busy = false
@@ -1348,11 +1542,6 @@ function ws.setAmuletNeed(on)
         end)
     end
     return true
-end
-
--- Инвентарь больше сам не включает амулет (из‑за этого липло на предметах под камень).
-function ws.syncAmuletFromInv()
-    return false
 end
 
 function ws.noteAmuletDemand(payload)
@@ -1416,6 +1605,7 @@ end
 
 -- Кладёт точильный амулет 1420 в правый слот станка (скины/аксессуары).
 function ws.placeAmulet()
+    if ws.attempt then return false end
     if not ws.amuletNeed then return false end
     ws.bestStone()
     local idx = tonumber(enchantSlotsData.index) or -1
@@ -1426,25 +1616,21 @@ function ws.placeAmulet()
         if slot < 0 then return false end
     end
     -- Уже лежит нужный амулет — не кликаем снова
-    if (tonumber(enchantSlotsData.right) or -1) == slot then
+    if (tonumber(enchantSlotsData.right) or -1) == slot and ws.available == 1 then
         return true
     end
-    local now = os.clock()
+    local now = nowSeconds()
     if (now - (tonumber(ws.lastPlaceAt) or 0)) < 0.8 then
         return false
     end
     ws.lastPlaceAt = now
-    ws.clickOnBlock(slot, 1)
-    wait(80)
-    ws.clickInvSlot(slot, '1420')
+    ws.available = 0
     local left = -1
     if ws.isPair() then
         local res = tonumber(ws.resSlot) or -1
         if res >= 0 then left = res end
     end
-    local json = ws.slotsJson(idx, left, slot, -1)
-    sendCEF('updateEnchantSlots|' .. json)
-    enchantSlotsData.right = slot
+    ws.sendSlots(idx, left, slot, -1)
     return true
 end
 
@@ -1544,39 +1730,17 @@ function ws.jsQuery(code, timeout)
     return nil
 end
 
-function ws.clickInvSlot(slot, needle)
-    slot = tonumber(slot) or -1
-    if slot < 0 then return nil end
-    -- CEF-инвентарь: клик по номеру слота, как ArzMarket clickOnBlock.
-    if ws.cefInv then
-        ws.clickOnBlock(slot, 1)
-        return 1
-    end
-    -- Текстдравовый инвентарь: номер клетки с сетки 6x6, клик по её id.
-    local localSlot = slot % 36
-    local td = ws.invTd[localSlot]
-    if td and slot < 36 and type(sampSendClickTextdraw) == 'function' then
-        sampSendClickTextdraw(td)
-        return 1
-    end
-    ws.clickOnBlock(slot, 1)
-    return 1
-end
-
-function ws.clickStoneJs()
-    return ws.clickInvSlot(ws.stoneSlot, tostring(ws.pickRightId()))
-end
-
 function ws.loopReady()
-    if ws.isPair() then
-        if not ws.resourcesReady() then return false end
-        if (os.clock() - (tonumber(ws.lastPlaceAt) or 0)) < 0.4 then return false end
-        return true
-    end
-    return (tonumber(ws.available) or 0) == 1 or ws.resourcesReady()
+    return workshop_check and not ws.attempt and ws.available == 1
+        and (tonumber(enchantSlotsData.index) or -1) >= 0
+        and (not ws.isCloth() or ws.resourcesReady())
+        and nowSeconds() - (ws.lastPlaceAt or -10) >= 0.4
+        and nowSeconds() - (ws.resultAt or -10) >= 0.8
 end
 
 function ws.placeStone()
+    if ws.attempt then return false end
+    if ws.isPatch() and ws.patchProgress().level>=3 then status=false;max_toch=0;return false end
     -- Скины/аксессуары после ошибки про амулет — кладём именно 1420
     if ws.amuletNeed and ws.isAmuletTab() then
         return ws.placeAmulet()
@@ -1616,15 +1780,16 @@ function ws.placeStone()
         end
         ws.lowMatSaid = false
     end
-    if ws.resourcesReady() then
+    if ws.resourcesReady() and ws.available == 1 then
         return true
     end
-    local now = os.clock()
+    local now = nowSeconds()
     local gap = pair and 1.0 or 2.5
     if (now - (tonumber(ws.lastPlaceAt) or 0)) < gap then
         return false
     end
     ws.lastPlaceAt = now
+    ws.available = 0
     local left = tonumber(enchantSlotsData.left) or -1
     local right = tonumber(enchantSlotsData.right) or -1
     if pair then
@@ -1633,36 +1798,17 @@ function ws.placeStone()
         left = tonumber(ws.resSlot) or -1
         right = stone
     else
-        if right ~= stone then
-            ws.clickStoneJs()
-        end
         right = stone
     end
-    local json = ws.slotsJson(idx, left, right, -1)
-    sendCEF('updateEnchantSlots|' .. json)
+    -- Assign slots once. Inventory clicks toggle selection and can undo this
+    -- assignment when CEF subsequently emits its own updateEnchantSlots.
+    ws.sendSlots(idx, left, right, -1)
     return idx >= 0
 end
 
 function ws.handleSend(text)
-    if type(text) ~= 'string' or text == '' then return end
     local json = text:match('^updateEnchantSlots|(.+)')
-    if not json then return end
-    parseEnchantSlotsPayload(json)
-    if not ws.autoOn() then return end
-    local stone = tonumber(ws.stoneSlot) or -1
-    if ws.isPair() then
-        local res = tonumber(ws.resSlot) or -1
-        if res >= 0 and (tonumber(enchantSlotsData.left) or -1) < 0 then
-            enchantSlotsData.left = res
-        end
-        if stone >= 0 and (tonumber(enchantSlotsData.right) or -1) < 0 then
-            enchantSlotsData.right = stone
-        end
-        return
-    end
-    if stone >= 0 and (tonumber(enchantSlotsData.right) or -1) == -1 then
-        enchantSlotsData.right = stone
-    end
+    if json then parseEnchantSlotsPayload(json) end
 end
 
 function ws.ingestItems(items, invType)
@@ -1686,13 +1832,27 @@ function ws.ingestItems(items, invType)
         ws.slots5736[slot] = nil
         ws.slots1420[slot] = nil
     end
+    ws.inventory = ws.inventory or {}
     local targetSlot = tonumber(enchantSlotsData.index) or -1
     for _, item in pairs(items) do
         if type(item) == 'table' then
-            local id = tonumber(item.item)
             local slot = tonumber(item.slot)
             if slot then
+                local previous = ws.inventory[slot]
+                local merged = {}
+                if previous and (tonumber(previous.amount) or 1)>0
+                    and (tonumber(item.amount) or 1)>0
+                    and (item.item == nil or tonumber(item.item) == tonumber(previous.item)) then
+                    for k, v in pairs(previous) do merged[k] = v end
+                end
+                for k, v in pairs(item) do merged[k] = v end
+                item = merged
+                ws.inventory[slot] = merged
+            end
+            local id = tonumber(item.item)
+            if slot then
                 local amt = tonumber(item.amount) or 1
+                if ws.patchLevels and ws.patchLevels[slot] and (amt<=0 or ws.patchLevels[slot].id~=id) then ws.patchLevels[slot]=nil end
                 dropSlot(slot)
                 if amt > 0 then
                     if id == Whetstone_ITEM_ID then
@@ -1732,32 +1892,20 @@ function ws.ingestItems(items, invType)
                     end
                     ws.itemSlot = slot or ws.itemSlot
                     ws.itemId = id
+                    ws.detectSelectedItem()
                     if newLvl ~= nil then
+                        local patch=ws.isPatch()
+                        if patch then newLvl=ws.patchProgress().level end
                         -- Успех только если уровень того же предмета вырос ровно на 1 после попытки.
                         -- Первое появление +11 в слоте и «уже +11» успехом не считаем.
-                        local hold = ws.chatHold
-                        if hold and (os.clock() - (tonumber(hold.at) or 0)) > 8 then
-                            ws.chatHold = nil
-                            hold = nil
-                        end
-                        if hold and prev < 0 and newLvl == hold.toLvl then
-                            ws.chatHold = nil
-                            hold = nil
-                        end
-                        local grew = ws.pendingResult == 1 and prev >= 0 and newLvl == prev + 1
-                        if not grew and hold and prev >= 0 and prev == hold.fromLvl and newLvl == hold.toLvl and newLvl == prev + 1 then
-                            grew = true
-                            ws.chatHold = nil
-                        elseif hold and prev >= 0 and newLvl ~= hold.fromLvl and newLvl ~= hold.toLvl then
-                            ws.chatHold = nil
-                        end
                         ws.itemEnchant = newLvl
-                        if grew then
-                            ws.finishSuccess(prev, newLvl)
-                        elseif ws.pendingResult == 1 then
-                            ws.pendingResult = nil
-                            ws.busy = false
+                        local attempt = ws.attempt
+                        if not patch and attempt and attempt.slot == slot and attempt.from >= 0 and newLvl == attempt.from + 1 then
+                            ws.completeAttempt(true, newLvl)
+                        elseif not patch and attempt and ws.pendingResult == 1 and newLvl >= 0 then
+                            ws.completeAttempt(true, newLvl)
                         end
+
                     end
                 end
             end
@@ -1765,19 +1913,22 @@ function ws.ingestItems(items, invType)
     end
     ws.bestStone()
     ws.bestRes()
-    if ws.isAmuletTab() then
-        ws.syncAmuletFromInv()
-    end
 end
 
 function ws.handle(ev, payload)
     if not ev then return end
     payload = payload or ''
+    local decoded = decodeJson(payload)
+    local arg = type(decoded) == 'table' and (decoded[1] ~= nil and decoded[1] or decoded) or nil
     if ev == 'event.inventory.setWorkshopVisible' then
-        local on = payload:find('true', 1, true) ~= nil
+        local on = arg == true
         workshop_check = on
         if not on then
+            ws.expectedSlots = nil
             ws.busy = false
+            ws.attempt = nil
+            status = false
+            max_toch = 0
             enchantSlotsData.index = -1
             enchantSlotsData.left = -1
             enchantSlotsData.right = -1
@@ -1796,22 +1947,36 @@ function ws.handle(ev, payload)
         return
     end
     if ev == 'event.inventory.setWorkshopGunContext' then
-        local on = payload:find('true', 1, true) ~= nil
+        local on = arg == true
         ws.gunCtx = on and true or false
+        if ws.autoShop and not ws.isCard() then
+            ws.autoShop = on and 'gun' or 'cloth'
+            ws.shop = ws.autoShop
+            ws.detectSelectedItem()
+        end
         if on then
             ws.lastCat = 6
-            if not ws.autoOn() and ws.isCloth() then ws.tab = 1 end
+            -- Context identifies the workshop, not its selected category.
         else
-            if not ws.autoOn() and ws.isGun() then ws.tab = 0 end
+            -- Keep the mode chosen by the user.
         end
         return
     end
     if ev == 'event.workshop.setResourceNeedItems' then
         workshop_check = true
-        local ln = tonumber(payload:match('"leftResourceAmount":(%-?%d+)'))
-        local rn = tonumber(payload:match('"rightResourceAmount":(%-?%d+)'))
+        local ln = tonumber(payload:match('"leftResourceAmount":%s*(%-?%d+)'))
+        local rn = tonumber(payload:match('"rightResourceAmount":%s*(%-?%d+)'))
         if ln then ws.leftNeed = ln end
         if rn then ws.rightNeed = rn end
+        -- An explicit resource ID from this demand event is authoritative.
+        -- Do not require a failed first attempt to discover the amulet.
+        if ws.isAmuletTab() and type(arg) == 'table' then
+            local id = tonumber(arg.rightResourceItem or arg.rightItemId or arg.rightItem
+                or arg.rightResourceId or arg.rightResource)
+            if id == AMULET_ID or id == Whetstone_ITEM_ID then
+                ws.setAmuletNeed(id == AMULET_ID)
+            end
+        end
         ws.noteLeftItem(payload)
         return
     end
@@ -1828,47 +1993,28 @@ function ws.handle(ev, payload)
             or ws.textHas(msg, 'Точильный камень') or ws.textHas(msg, 'Укроп')
             or ws.textHas(msg, 'Материал') or ws.textHas(msg, 'Точильный амулет')
             or ws.textHas(msg, 'Заточка для бронежилета') or ws.textHas(msg, 'Заточка бронежилета')
-        if low and (ws.isPair() or ws.isCloth() or ws.isWeaponTab()) then
+        if low and ws.attempt and not ws.attempt.started then
+            ws.attempt = nil
             ws.busy = false
+            ws.available = 0
         end
         return
     end
-    if ev == 'event.inventory.workShop' then
+    if ev == 'event.inventory.workShop' and type(arg) == 'table' then
         workshop_check = true
-        local action = tonumber(payload:match('"action":(%-?%d+)'))
+        if ws.isCard() then return end
+        local action = tonumber(arg.action)
+        local data = type(arg.data) == 'table' and arg.data or {}
         if action == 2 then
-            local available = tonumber(payload:match('"available":(%-?%d+)'))
-            if available == nil and payload:find('"available":true', 1, true) then available = 1 end
-            if available == nil and payload:find('"available":false', 1, true) then available = 0 end
-            if available ~= nil then ws.available = available end
-        else
-            if action == 0 then
-                ws.busy = true
-                ws.busyAt = os.clock()
-                ws.attemptFrom = tonumber(ws.itemEnchant)
-            else
-                if action == 1 then
-                    local wasBusy = ws.busy
-                    ws.busy = false
-                    local suc = tonumber(payload:match('"success":(%-?%d+)'))
-                    if suc == nil and (payload:find('"success":true', 1, true) or payload:find('"success": true', 1, true)) then
-                        suc = 1
-                    end
-                    if suc == nil and (payload:find('"success":false', 1, true) or payload:find('"success": false', 1, true)) then
-                        suc = 0
-                    end
-                    -- Вставка скина и обновление слота тоже шлют action 1. Без начатой попытки в статистику не пишем.
-                    if wasBusy then
-                        if suc == 1 then
-                            ws.pendingResult = 1
-                            if (tonumber(ws.attemptFrom) or -1) < 0 then
-                                ws.attemptFrom = tonumber(ws.itemEnchant)
-                            end
-                        else
-                            ws.applyFail()
-                        end
-                    end
-                end
+            ws.available = (data.available == true or tonumber(data.available) == 1) and 1 or 0
+        elseif action == 0 then
+            ws.beginAttempt()
+            if ws.attempt then ws.attempt.started = true end
+        elseif action == 1 then
+            if data.success == true or tonumber(data.success) == 1 then
+                ws.completeAttempt(true)
+            elseif data.success == false or tonumber(data.success) == 0 then
+                ws.completeAttempt(false)
             end
         end
         return
@@ -1877,6 +2023,7 @@ end
 
 local function processCefText(str)
     if type(str) ~= 'string' or str == '' then return end
+    if str:find('playerInventory', 1, true) then parsePlayerInventory(str); return end
     local ev, payload = eventOf(str)
     if ev then
         pcall(ws.handle, ev, payload or '')
@@ -1897,52 +2044,13 @@ local function processChatLine(text)
         return
     end
     -- Карты: ждём именно сообщение Увы/Успех, только потом кладём снова
-    if ws.isCard() and (ws.busy or ws.card.waitingChat or status) then
+    if ws.isCard() and ws.card.waitingChat then
         ws.afterCardResult(isSuccess, fromLvl, toLvl)
         return
     end
-    local known = tonumber(ws.itemEnchant)
-    if known == nil or known < 0 then
-        known = tonumber(ws.attemptFrom)
-    end
-    if known == nil then known = -1 end
-    -- Сообщение про другой уровень (скин уже +11, а чат про +10 → +11) — фантом, не пишем.
-    if known >= 0 and fromLvl ~= known then
-        return
-    end
-    if known < 0 and not ws.busy and ws.pendingResult ~= 1 then
-        return
-    end
-    if not isSuccess then
-        ws.busy = false
-        ws.pendingResult = nil
-        ws.statFail()
-        return
-    end
-    if isSuccess and toLvl then
-        if known >= 0 and toLvl ~= known + 1 then
-            return
-        end
-        -- Уровень предмета ещё не видели: не записываем переход, пока инвентарь не подтвердит рост.
-        if known < 0 then
-            ws.chatHold = { fromLvl = fromLvl, toLvl = toLvl, at = os.clock() }
-            ws.busy = false
-            ws.pendingResult = nil
-            return
-        end
-        ws.itemEnchant = toLvl
-        ws.attemptFrom = toLvl
-        queueSuccessSound()
-        ws.statOk(toLvl)
-        ws.busy = false
-        ws.pendingResult = nil
-        local target = tonumber(max_toch) or 0
-        if toLvl == target and fromLvl == (target - 1) then
-            max_toch = 0
-            status = false
-            sampAddChatMessage(u8:decode("У вас заточился предмет до указанной вами заточки, выбери другой предмет или другой уровень"), -1)
-        end
-    end
+    if not ws.attempt then return end
+    if not ws.isPatch() and ws.attempt.from >= 0 and fromLvl ~= ws.attempt.from then return end
+    ws.completeAttempt(isSuccess, toLvl)
 end
 
 local function pumpIncoming()
@@ -1959,115 +2067,99 @@ local function pumpIncoming()
     end
 end
 
-local function chainArz(name, fn)
-    if not arizona then return end
-    local prev = arizona[name]
-    arizona[name] = function(packet)
-        local ok1, r1 = pcall(fn, packet)
-        local r2
-        if prev then
-            local ok2, x = pcall(prev, packet)
-            if ok2 then r2 = x end
-        end
-        if ok1 and r1 == false then return false end
-        if ok1 and type(r1) == 'table' then return r1 end
-        return r2
-    end
-end
-
-local function snapCefPacket(packet)
-    if not packet then return end
-    pcall(function()
-        local t = packet.text
-        if type(t) ~= 'string' or t == '' then return end
-        if t:find('playerInventory', 1, true) then
-            pcall(parsePlayerInventory, t)
+-- Read our own copy from offset zero and always restore the caller's cursor.
+-- For compressed strings the advertised length is OUTPUT capacity, not wire size.
+local transport = { packets = 0, inventory = 0, errors = 0, lastError = '' }
+local function readCefPacket(bs, outgoing)
+    local saved = raknetBitStreamGetReadOffset(bs)
+    local ok, text, serverId = pcall(function()
+        raknetBitStreamSetReadOffset(bs, 0)
+        raknetBitStreamIgnoreBits(bs, 8)
+        local kind = raknetBitStreamReadInt8(bs)
+        if kind < 0 then kind = kind + 256 end
+        if outgoing then
+            if kind ~= 18 then return end
+        elseif kind == 17 then
+            raknetBitStreamIgnoreBits(bs, 32)
+        else
             return
         end
-        if t:find('event.storage', 1, true) then return end
-        local keep = t:find('workShop', 1, true)
-            or t:find('setWorkshop', 1, true)
-            or t:find('setResourceNeedItems', 1, true)
-            or t:find('updateEnchantSlots', 1, true)
-            or t:find('event.notify.initialize', 1, true)
-            or t:find('startEnchant', 1, true)
-        if not keep then return end
-        queueCef(t)
+        local length = raknetBitStreamReadInt16(bs)
+        if length < 0 then length = length + 65536 end
+        if length == 0 then return '' end
+        local encoded = not outgoing and raknetBitStreamReadInt8(bs) or 0
+        if encoded ~= 0 then
+            return raknetBitStreamDecodeString(bs, length + 1)
+        end
+        if length * 8 > raknetBitStreamGetNumberOfUnreadBits(bs) then
+            error('truncated CEF packet')
+        end
+        local value = raknetBitStreamReadString(bs, length)
+        local server = 0
+        if outgoing and raknetBitStreamGetNumberOfUnreadBits(bs) >= 32 then
+            server = raknetBitStreamReadInt32(bs)
+        end
+        return value, server
     end)
+    raknetBitStreamSetReadOffset(bs, saved)
+    if not ok then
+        transport.errors = transport.errors + 1
+        transport.lastError = tostring(text)
+        if transport.errors <= 3 then print('[AutoZatochka] CEF read: ' .. tostring(text)) end
+        return
+    end
+    return text, serverId
 end
 
-local function snapSendPacket(packet)
-    if not packet or type(packet.text) ~= 'string' or packet.text == '' then return end
-    local t = packet.text
-    queueSend(t)
-    if not ws.autoOn() then return end
-    local json = t:match('^updateEnchantSlots|(.+)')
-    if not json then return end
-    pcall(ws.bestStone)
-    pcall(ws.bestRes)
-    local stone = tonumber(ws.stoneSlot) or -1
-    local res = tonumber(ws.resSlot) or -1
-    local idx = tonumber(json:match('"index":(%-?%d+)')) or tonumber(enchantSlotsData.index) or -1
-    local left = tonumber(json:match('"left":(%-?%d+)')) or tonumber(enchantSlotsData.left) or -1
-    local right = tonumber(json:match('"right":(%-?%d+)')) or -1
-    local color = tonumber(json:match('"color":(%-?%d+)')) or -1
-    if idx < 0 then return end
-    local need = false
-    if ws.isPair() then
-        if res >= 0 and left ~= res then
-            left = res
-            need = true
-        end
-        if stone >= 0 and right ~= stone then
-            right = stone
-            need = true
-        end
-    elseif stone >= 0 and right ~= stone then
-        right = stone
-        need = true
+local function receiveCefPacket(id, bs)
+    if id ~= 220 then return end
+    local text = readCefPacket(bs, false)
+    if type(text) ~= 'string' or text == '' then return end
+    transport.packets = transport.packets + 1
+    if text:find('playerInventory', 1, true) then transport.inventory = transport.inventory + 1 end
+    queueCef(text)
+end
+
+function ws.preserveSlots(text)
+    if not ws.autoOn() or ws.isCard() then return text end
+    local json = text:match('^updateEnchantSlots|(.+)')
+    local want = ws.expectedSlots
+    if not json or not want then return text end
+    local data = decodeJson(json)
+    if type(data) ~= 'table' then return text end
+    if tonumber(data.index) ~= want.index then
+        ws.expectedSlots = nil
+        return text
     end
-    if color ~= -1 then
-        color = -1
-        need = true
+    return 'updateEnchantSlots|' .. ws.slotsJson(want.index, want.left, want.right, tonumber(data.color) or -1)
+end
+
+local function sendCefPacket(id, bs)
+    if id ~= 220 then return end
+    local text, serverId = readCefPacket(bs, true)
+    if type(text) ~= 'string' then return end
+    local corrected = ws.preserveSlots(text)
+    if corrected ~= text then
+        raknetBitStreamSetWriteOffset(bs, 0)
+        raknetBitStreamWriteInt8(bs, 220)
+        raknetBitStreamWriteInt8(bs, 18)
+        raknetBitStreamWriteInt16(bs, #corrected)
+        raknetBitStreamWriteString(bs, corrected)
+        raknetBitStreamWriteInt32(bs, serverId or 0)
     end
-    if not need then return end
-    packet.text = 'updateEnchantSlots|' .. ws.slotsJson(idx, left, right, color)
-    return { packet }
+    queueSend(corrected)
+end
+
+-- Independent of arizona-events: that library rejects some compressed packets
+-- before onArizonaDisplay, so a successful require is not evidence of delivery.
+if type(addEventHandler) == 'function' then
+    addEventHandler('onReceivePacket', receiveCefPacket)
+    addEventHandler('onSendPacket', sendCefPacket)
 end
 
 function main()
     while not isSampAvailable() do wait(100) end
     sampRegisterChatCommand('mt', function() WinState[0] = not WinState[0] end)
-
-    -- У кого нет lib/arizona-events: синхронная докачка -> перезагрузка скрипта -> уже с require
-    if not arizonaEventsLibPresent() then
-        sampAddChatMessage('[AutoZatochka] ' .. u8:decode('Не найдены библиотеки arizona-events. Скачиваю с GitHub...'), -1)
-        local ok = syncArizonaEventsLib(true)
-        if ok then
-            sampAddChatMessage('[AutoZatochka] ' .. u8:decode('Загрузка завершена. Перезапуск скрипта...'), -1)
-            wait(400)
-            thisScript():reload()
-        else
-            sampAddChatMessage('[AutoZatochka] ' .. u8:decode('Скачивание не удалось. Проверьте интернет. Файлы: zatochka/arizona-events на GitHub.'), -1)
-        end
-        return
-    end
-
-    do
-        local ok_load, mod = pcall(require, 'arizona-events')
-        if ok_load and mod then
-            arizona = mod
-        else
-            arizona = nil
-        end
-    end
-
-    if arizona then
-        chainArz('onArizonaDisplay', snapCefPacket)
-        chainArz('onArizonaIncomingCef18', snapCefPacket)
-        chainArz('onArizonaSend', snapSendPacket)
-    end
-
     sampAddChatMessage('[AutoZatochka] ' .. u8:decode('загружен. /mt'), -1)
 
     -- Загрузка звука успешной заточки с GitHub в фоне
@@ -2076,44 +2168,6 @@ function main()
         initSuccessSound()
     end)
 
-    -- Пакет 220 разбирает lib arizona-events (onArizonaDisplay / onArizonaIncomingCef18). Если библиотека не загрузилась — вручную.
-    if not arizona then
-        pcall(function()
-            addEventHandler('onReceivePacket', function(id, bs)
-                if id ~= 220 then return end
-                local act
-                pcall(function()
-                    local off
-                    if raknetBitStreamGetReadOffset then off = raknetBitStreamGetReadOffset(bs) end
-                    if raknetBitStreamSetReadOffset then raknetBitStreamSetReadOffset(bs, 0) end
-                    raknetBitStreamIgnoreBits(bs, 8)
-                    local packetType = raknetBitStreamReadInt8(bs)
-                    if packetType == 17 then
-                        raknetBitStreamIgnoreBits(bs, 32)
-                        local length = raknetBitStreamReadInt16(bs)
-                        local encoded = raknetBitStreamReadInt8(bs)
-                        if length and length > 0 then
-                            local str = (encoded ~= 0) and raknetBitStreamDecodeString(bs, length + encoded) or raknetBitStreamReadString(bs, length)
-                            if type(str) == 'string' then act = str end
-                        end
-                    else
-                        if packetType == 18 then
-                            local dataLength = raknetBitStreamReadInt16(bs)
-                            local encoded = raknetBitStreamReadInt8(bs)
-                            if dataLength and dataLength > 0 then
-                                local data = (encoded ~= 0) and raknetBitStreamDecodeString(bs, dataLength + encoded) or raknetBitStreamReadString(bs, dataLength)
-                                if type(data) == 'string' then act = data end
-                            end
-                        end
-                    end
-                    if off and raknetBitStreamSetReadOffset then raknetBitStreamSetReadOffset(bs, off) end
-                end)
-                if type(act) == 'string' then queueCef(act) end
-            end)
-        end)
-    end
-    
-    
     while true do
         pcall(pumpIncoming)
         if wantSound then
@@ -2134,9 +2188,10 @@ function main()
                 if not c.open then
                     wait(400)
                 elseif c.waitingChat or ws.busy then
-                    if os.clock() - (tonumber(ws.busyAt) or 0) > 25 then
-                        ws.busy = false
-                        c.waitingChat = false
+                    if nowSeconds() - (tonumber(ws.busyAt) or 0) > 25 then
+                        status = false
+                        max_toch = 0
+                        sampAddChatMessage(u8:decode('[AutoZatochka] Нет результата улучшения карт. Открой мастерскую заново.'), -1)
                     else
                         wait(150)
                     end
@@ -2152,16 +2207,16 @@ function main()
                     wait(500)
                 else
                     if ws.busy then
-                        if os.clock() - (tonumber(ws.busyAt) or 0) > 20 then
-                            ws.busy = false
+                        if nowSeconds() - (tonumber(ws.busyAt) or 0) > 20 then
+                            status = false
+                            max_toch = 0
+                            sampAddChatMessage(u8:decode('[AutoZatochka] Нет результата попытки. Открой мастерскую заново.'), -1)
                         else
                             wait(120)
                         end
                     else
                         local ready = ws.loopReady()
                         if ready then
-                            ws.busy = true
-                            ws.busyAt = os.clock()
                             startEnchant()
                             wait(800)
                         else
@@ -2225,32 +2280,17 @@ end
 
 function ws.pickLevel(i)
     i = tonumber(i) or 0
+    if ws.isPatch() and i < 2 then return end
+    if ws.isPatch() and i > 3 then i = 3 end
+    if ws.isCard() and i < 2 then return end
     if ws.isCard() and i > 3 then i = 3 end
     if max_toch ~= i then
+        if ws.isPatch() then ws.patchProgress().attempts=0 end
         status = true
         max_toch = i
         ws.lowMatSaid = false
-        lua_thread.create(function()
-            wait(120)
-            if ws.isCard() then
-                ws.card.waitingChat = false
-                ws.card.placed = 0
-                ws.busy = false
-                ws.placeCards()
-                wait(500)
-                if status and ws.cardReady() then
-                    ws.startCardEnchant()
-                end
-                return
-            end
-            ws.placeStone()
-            wait(400)
-            if status and ws.loopReady() and not ws.busy then
-                ws.busy = true
-                ws.busyAt = os.clock()
-                startEnchant()
-            end
-        end)
+        -- The main loop owns placement and starting in every workshop.
+        -- Selecting a goal must not run a second controller or reset progress.
     else
         status = false
         max_toch = 0
@@ -2282,6 +2322,7 @@ end
 
 function ws.modeTitle()
     if ws.isCard() then return 'Эликсир мастер' end
+    if ws.autoShop then return ws.autoShop == 'gun' and 'Магазин оружия' or 'Мастерская одежды' end
     if ws.isGun() then return 'Скины на оружие' end
     if ws.isAttach() then return 'Обвесы' end
     if ws.isArmor() then return 'Бронежилеты' end
@@ -2291,77 +2332,32 @@ end
 
 function ws.chooseMode(tab)
     tab = tonumber(tab) or 0
-    local shop = 'cloth'
-    if tab == 1 or tab == 2 then shop = 'gun'
-    elseif tab == 5 then shop = 'card' end
-    if tonumber(ws.tab) ~= tab then
-        ws.setTab(tab)
+    local shop = (tab == 5) and 'card' or ((tab == 1 or tab == 2) and 'gun' or 'cloth')
+    if ws.shop ~= shop or (shop ~= 'card' and not ws.autoShop) or (shop == 'card' and not ws.isCard()) then
+        ws.setTab(shop == 'card' and 5 or (shop == 'gun' and 1 or 0), true)
     end
+    ws.autoShop = shop ~= 'card' and shop or nil
     ws.shop = shop
     ws.picker = nil
     ws.screen = 'work'
+    if ws.autoShop then ws.detectSelectedItem() end
 end
 
 function ws.drawHome()
     imgui.SetCursorPos(imgui.ImVec2(16, 64))
     imgui.TextDisabled('Выбери мастерскую')
     imgui.SetCursorPos(imgui.ImVec2(16, 96))
-    if ws.uiNav('Мастерская одежды', ws.picker == 'cloth', 476, 52) then
-        ws.picker = 'cloth'
-        ws.shop = 'cloth'
+    if ws.uiNav('Мастерская одежды', ws.autoShop == 'cloth', 476, 52) then
+        ws.chooseMode(0)
     end
     imgui.SetCursorPos(imgui.ImVec2(16, 160))
-    if ws.uiNav('Магазин оружия', ws.picker == 'gun', 476, 52) then
-        ws.picker = 'gun'
-        ws.shop = 'gun'
+    if ws.uiNav('Магазин оружия', ws.autoShop == 'gun', 476, 52) then
+        ws.chooseMode(1)
     end
     imgui.SetCursorPos(imgui.ImVec2(16, 224))
     if ws.uiNav('Эликсир мастер', ws.isCard() or ws.picker == 'card', 476, 52) then
         ws.chooseMode(5)
     end
-end
-
-function ws.drawPicker()
-    local cloth = ws.picker == 'cloth'
-    local W = 360
-    local H = cloth and 292 or 228
-    imgui.SetNextWindowPos(imgui.ImVec2(780, 460), imgui.Cond.FirstUseEver, imgui.ImVec2(0, 0.5))
-    imgui.SetNextWindowSize(imgui.ImVec2(W, H), imgui.Cond.Always)
-    imgui.Begin('##azPicker', nil, imgui.WindowFlags.NoDecoration)
-    local dl = imgui.GetWindowDrawList()
-    local p = imgui.GetWindowPos()
-    local sz = imgui.GetWindowSize()
-    dl:AddRectFilled(p, imgui.ImVec2(p.x + 4, p.y + sz.y), imgui.ColorConvertFloat4ToU32(ws.uiAccent()), 2)
-    imgui.SetCursorPos(imgui.ImVec2(16, 14))
-    imgui.PushStyleColor(imgui.Col.Text, ws.uiAccent())
-    imgui.Text(cloth and 'Мастерская одежды' or 'Магазин оружия')
-    imgui.PopStyleColor()
-    imgui.SetCursorPos(imgui.ImVec2(W - 44, 8))
-    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.8, 0.22, 0.32, 0.35))
-    imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.9, 0.25, 0.35, 0.7))
-    imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.9, 0.25, 0.35, 0.9))
-    if imgui.Button('X##picker', imgui.ImVec2(28, 28)) then
-        ws.picker = nil
-    end
-    imgui.PopStyleColor(3)
-    imgui.SetCursorPos(imgui.ImVec2(16, 56))
-    imgui.TextDisabled('Что точить')
-    if cloth then
-        imgui.SetCursorPos(imgui.ImVec2(16, 86))
-        if ws.uiNav('Аксессуары', ws.isAcc(), 328, 44) then ws.chooseMode(0) end
-        imgui.SetCursorPos(imgui.ImVec2(16, 138))
-        if ws.uiNav('Скины', ws.isSkin(), 328, 44) then ws.chooseMode(3) end
-        imgui.SetCursorPos(imgui.ImVec2(16, 190))
-        if ws.uiNav('Бронежилеты', ws.isArmor(), 328, 44) then ws.chooseMode(4) end
-        imgui.SetCursorPos(imgui.ImVec2(16, 248))
-        imgui.TextDisabled('Ресурс скрипт выберет сам')
-    else
-        imgui.SetCursorPos(imgui.ImVec2(16, 86))
-        if ws.uiNav('Скины на оружие', ws.isGun(), 328, 44) then ws.chooseMode(1) end
-        imgui.SetCursorPos(imgui.ImVec2(16, 138))
-        if ws.uiNav('Обвесы', ws.isAttach(), 328, 44) then ws.chooseMode(2) end
-    end
-    imgui.End()
 end
 
 function ws.drawWork()
@@ -2370,7 +2366,7 @@ function ws.drawWork()
         status = false
         max_toch = 0
         ws.screen = 'home'
-        ws.picker = (ws.shop == 'card') and nil or ws.shop
+        ws.picker = nil
     end
     imgui.SameLine()
     imgui.Text(ws.modeTitle())
@@ -2393,7 +2389,8 @@ function ws.drawWork()
         if ws.isCard() then
             local nCards = ws.cardCount(tonumber(max_toch) or 99)
             local c = ws.card
-            imgui.TextDisabled('Карт в инвентаре: ' .. tostring(nCards) .. '  ·  на попытку 2')
+            local filled = (c.leftFilled and 1 or 0) + (c.rightFilled and 1 or 0)
+            imgui.TextDisabled('Карт для выбора: ' .. tostring(nCards) .. '  ·  на станке: ' .. tostring(filled) .. '/2')
             if not c.open then
                 imgui.TextDisabled('Открой Эликсир мастер в игре')
             end
@@ -2414,9 +2411,10 @@ function ws.drawWork()
     do
         local i
         local maxL = ws.maxLevel()
-        for i = 1, maxL do
-            local col = (i - 1) % 4
-            local row = math.floor((i - 1) / 4)
+        local minL = (ws.isCard() or ws.isPatch()) and 2 or 1
+        for i = minL, maxL do
+            local col = (i - minL) % 4
+            local row = math.floor((i - minL) / 4)
             imgui.SetCursorPos(imgui.ImVec2(16 + col * 118, 190 + row * 36))
             if ws.uiLvl(i, 110, 30) then
                 ws.pickLevel(i)
@@ -2538,9 +2536,6 @@ imgui.OnFrame(function() return WinState[0] end,
             end
         end
         imgui.End()
-        if ws.picker and not SetWin[0] and (ws.screen or 'home') ~= 'work' then
-            ws.drawPicker()
-        end
     end
 )
 
@@ -2554,6 +2549,17 @@ if sampev then
             local ok, a = pcall(prevTd, id, data)
             if ok then return a end
         end
+    end
+
+    local prevTdText = sampev.onTextDrawSetString
+    function sampev.onTextDrawSetString(id, text)
+        ws.cardTextChanged(id, text)
+        if prevTdText then return prevTdText(id, text) end
+    end
+    local prevTdHide = sampev.onTextDrawHide
+    function sampev.onTextDrawHide(id)
+        ws.cardTdHidden(id)
+        if prevTdHide then return prevTdHide(id) end
     end
 
     local prevMsg = sampev.onServerMessage
