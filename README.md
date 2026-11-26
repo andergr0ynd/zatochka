@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <strong>Версия на GitHub: 1.39</strong> · Windows · Arizona RP · MoonLoader<br>
+  <strong>Версия на GitHub: 1.40</strong> · Windows · Arizona RP · MoonLoader<br>
   Выбери предмет и целевой уровень — скрипт выполнит повторяющиеся действия заточки.
 </p>
 

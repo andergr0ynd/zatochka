@@ -2,7 +2,7 @@
     Автозаточка Arizona (CEF). Команда /mt
 ]]
 script_name('AutoZatochka')
-script_version('1.39')
+script_version('1.40')
 script_author('andergr0ynd')
 script_description('Автозаточка Arizona: одежда, оружие, Эликсир мастер (карты)')
 
@@ -2345,7 +2345,7 @@ function ws.drawSettingsBody()
     end
     imgui.Dummy(imgui.ImVec2(0, 14))
     imgui.TextDisabled('/mt  — открыть окно')
-    imgui.TextDisabled('Шестерёнка ещё раз — назад')
+    imgui.TextDisabled('Кнопка с тремя точками — назад')
 end
 
 function ws.modeTitle()
@@ -2371,25 +2371,43 @@ function ws.chooseMode(tab)
     if ws.autoShop then ws.detectSelectedItem() end
 end
 
+function ws.homeCard(id, title, subtitle, y, selected, tab)
+    imgui.SetCursorPos(imgui.ImVec2(16,y))
+    local clicked=imgui.InvisibleButton('##workshop'..id,imgui.ImVec2(476,60))
+    local hover=imgui.IsItemHovered()
+    local dl=imgui.GetWindowDrawList()
+    local a=imgui.GetItemRectMin()
+    local b=imgui.GetItemRectMax()
+    local function color(r,g,b,alpha)
+        return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r,g,b,alpha or 1))
+    end
+    dl:AddRectFilled(a,b,color(0.09,0.12,0.18,hover and 1 or 0.8),9)
+    dl:AddRect(a,b,color(0.36,0.58,1,selected and 0.65 or (hover and 0.38 or 0.12)),9)
+    dl:AddRectFilled(imgui.ImVec2(a.x+12,a.y+12),imgui.ImVec2(a.x+48,a.y+48),color(0.36,0.58,1,0.12),8)
+    dl:AddText(imgui.ImVec2(a.x+21,a.y+22),color(0.50,0.69,1),id)
+    dl:AddText(imgui.ImVec2(a.x+62,a.y+12),color(0.93,0.95,0.99),title)
+    dl:AddText(imgui.ImVec2(a.x+62,a.y+34),color(0.52,0.59,0.69),subtitle)
+    local x,cy=b.x-22,a.y+30
+    local arrow=color(0.50,0.69,1,hover and 1 or 0.55)
+    dl:AddLine(imgui.ImVec2(x-3,cy-4),imgui.ImVec2(x+1,cy),arrow,1.5)
+    dl:AddLine(imgui.ImVec2(x+1,cy),imgui.ImVec2(x-3,cy+4),arrow,1.5)
+    if clicked then ws.chooseMode(tab) end
+end
+
 function ws.drawHome()
-    imgui.SetCursorPos(imgui.ImVec2(16, 64))
-    imgui.TextDisabled('Выбери мастерскую')
-    imgui.SetCursorPos(imgui.ImVec2(16, 96))
-    if ws.uiNav('Мастерская одежды', ws.autoShop == 'cloth', 476, 52) then
-        ws.chooseMode(0)
-    end
-    imgui.SetCursorPos(imgui.ImVec2(16, 160))
-    if ws.uiNav('Магазин оружия', ws.autoShop == 'gun', 476, 52) then
-        ws.chooseMode(1)
-    end
-    imgui.SetCursorPos(imgui.ImVec2(16, 224))
-    if ws.uiNav('Эликсир мастер', ws.isCard() or ws.picker == 'card', 476, 52) then
-        ws.chooseMode(5)
-    end
+    imgui.SetCursorPos(imgui.ImVec2(20,88))
+    imgui.Text('Мастерские')
+    imgui.SameLine()
+    imgui.TextDisabled(' / выбери раздел')
+    ws.homeCard('01','Мастерская одежды','Аксессуары, скины, бронежилеты и нашивки',120,ws.autoShop=='cloth',0)
+    ws.homeCard('02','Магазин оружия','Скины на оружие и обвесы',192,ws.autoShop=='gun',1)
+    ws.homeCard('03','Эликсир мастер','Улучшение карт до +2 и +3',264,ws.isCard(),5)
+    imgui.SetCursorPos(imgui.ImVec2(20,344))
+    imgui.TextDisabled('Выбери предмет в игре — тип определится автоматически')
 end
 
 function ws.drawWork()
-    imgui.SetCursorPos(imgui.ImVec2(16, 48))
+    imgui.SetCursorPos(imgui.ImVec2(16, 84))
     if ws.uiNav('Назад', false, 88, 32) then
         status = false
         max_toch = 0
@@ -2399,7 +2417,7 @@ function ws.drawWork()
     imgui.SameLine()
     imgui.Text(ws.modeTitle())
 
-    imgui.SetCursorPos(imgui.ImVec2(16, 90))
+    imgui.SetCursorPos(imgui.ImVec2(16, 126))
     if imgui.BeginChild('##status', imgui.ImVec2(476, 70), false) then
         local ench = tonumber(ws.itemEnchant) or -1
         local run = status and (tonumber(max_toch) or 0) > 0
@@ -2434,7 +2452,7 @@ function ws.drawWork()
         imgui.EndChild()
     end
 
-    imgui.SetCursorPos(imgui.ImVec2(16, 168))
+    imgui.SetCursorPos(imgui.ImVec2(16, 204))
     imgui.TextDisabled('Точить до')
     do
         local i
@@ -2443,14 +2461,14 @@ function ws.drawWork()
         for i = minL, maxL do
             local col = (i - minL) % 4
             local row = math.floor((i - minL) / 4)
-            imgui.SetCursorPos(imgui.ImVec2(16 + col * 118, 190 + row * 36))
+            imgui.SetCursorPos(imgui.ImVec2(16 + col * 118, 226 + row * 36))
             if ws.uiLvl(i, 110, 30) then
                 ws.pickLevel(i)
             end
         end
     end
 
-    imgui.SetCursorPos(imgui.ImVec2(16, 306))
+    imgui.SetCursorPos(imgui.ImVec2(16, 342))
     if imgui.BeginChild('##stats', imgui.ImVec2(476, 118), false) then
         imgui.PushStyleColor(imgui.Col.Text, ws.uiAccent())
         imgui.Text('Статистика  ·  ' .. ws.modeTitle())
@@ -2500,11 +2518,11 @@ end
 imgui.OnFrame(function() return WinState[0] end,
     function()
         local W = 508
-        local H = 320
+        local H = 376
         if SetWin[0] then
-            H = 400
+            H = 436
         elseif (ws.screen or 'home') == 'work' then
-            H = 448
+            H = 484
         end
         imgui.SetNextWindowPos(imgui.ImVec2(500, 500), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
         imgui.SetNextWindowSize(imgui.ImVec2(W, H), imgui.Cond.Always)
@@ -2512,22 +2530,29 @@ imgui.OnFrame(function() return WinState[0] end,
         local dl = imgui.GetWindowDrawList()
         local p = imgui.GetWindowPos()
         local sz = imgui.GetWindowSize()
-        dl:AddRectFilled(p, imgui.ImVec2(p.x + 4, p.y + sz.y), imgui.ColorConvertFloat4ToU32(ws.uiAccent()), 2)
+        dl:AddRectFilled(p,imgui.ImVec2(p.x+sz.x,p.y+70),
+            imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.065,0.085,0.13,1)),10)
+        dl:AddLine(imgui.ImVec2(p.x+16,p.y+70),imgui.ImVec2(p.x+W-16,p.y+70),
+            imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.36,0.58,1,0.15)),1)
         logo.load()
         if logo.texture then
-            imgui.SetCursorPos(imgui.ImVec2(16, 3))
-            imgui.Image(logo.texture,imgui.ImVec2(210,40),
+            imgui.SetCursorPos(imgui.ImVec2(18, 8))
+            imgui.Image(logo.texture,imgui.ImVec2(278,54),
                 imgui.ImVec2(0.012,0.23),imgui.ImVec2(0.985,0.81))
-            imgui.SetCursorPos(imgui.ImVec2(240, 12))
         else
-            imgui.SetCursorPos(imgui.ImVec2(16, 12))
+            imgui.SetCursorPos(imgui.ImVec2(22, 26))
             imgui.PushStyleColor(imgui.Col.Text, ws.uiAccent())
             imgui.Text('AutoZatochka')
             imgui.PopStyleColor()
-            imgui.SameLine()
         end
-        imgui.TextDisabled('  Arizona  ·  ' .. tostring(thisScript().version or ''))
-        imgui.SetCursorPos(imgui.ImVec2(W - 76, 8))
+        local version='v'..tostring(thisScript().version or '')
+        local versionSize=imgui.CalcTextSize(version)
+        local vx=W-90-versionSize.x-20
+        dl:AddRectFilled(imgui.ImVec2(p.x+vx,p.y+23),imgui.ImVec2(p.x+W-90,p.y+47),
+            imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.36,0.58,1,0.10)),6)
+        dl:AddText(imgui.ImVec2(p.x+vx+10,p.y+27),
+            imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.57,0.66,0.80,1)),version)
+        imgui.SetCursorPos(imgui.ImVec2(W - 76, 21))
         if ws.uiIcon('##gear', 28) then
             SetWin[0] = not SetWin[0]
         end
@@ -2557,7 +2582,7 @@ imgui.OnFrame(function() return WinState[0] end,
         imgui.PopStyleColor(3)
 
         if SetWin[0] then
-            imgui.SetCursorPos(imgui.ImVec2(16, 52))
+            imgui.SetCursorPos(imgui.ImVec2(16, 88))
             imgui.PushStyleColor(imgui.Col.Text, ws.uiAccent())
             imgui.Text('Настройки')
             imgui.PopStyleColor()
