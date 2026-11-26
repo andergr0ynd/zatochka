@@ -869,11 +869,6 @@ function startEnchant()
         local progress=ws.patchProgress()
         local target=math.min(3,tonumber(max_toch) or 3)
         if progress.level>=3 or (target>0 and progress.level>=target) then status=false;max_toch=0;return false end
-        if progress.attempts>=30 then
-            status=false;max_toch=0
-            sampAddChatMessage(u8:decode('[AutoZatochka] Остановка: 30 попыток нашивки. Проверьте её уровень перед продолжением.'),-1)
-            return false
-        end
     end
     if not ws.beginAttempt() then return false end
     sendCEF('startEnchant')
@@ -886,7 +881,6 @@ function ws.beginAttempt()
     if progress and progress.level>=3 then return false end
     ws.attempt = { from = progress and progress.level or tonumber(ws.itemEnchant) or -1,
         slot = enchantSlotsData.index, tab = ws.tab }
-    if progress then progress.attempts=progress.attempts+1 end
     ws.busy = true
     ws.busyAt = nowSeconds()
     ws.available = 0
@@ -1054,7 +1048,7 @@ function ws.patchProgress()
     local progress=ws.patchLevels[slot]
     local reported=ws.patchReportedLevel(item)
     if not progress or progress.id~=id then
-        progress={id=id,level=reported or 1,attempts=0}
+        progress={id=id,level=reported or 1}
         ws.patchLevels[slot]=progress
     elseif reported and reported>progress.level then
         progress.level=reported
@@ -2285,7 +2279,6 @@ function ws.pickLevel(i)
     if ws.isCard() and i < 2 then return end
     if ws.isCard() and i > 3 then i = 3 end
     if max_toch ~= i then
-        if ws.isPatch() then ws.patchProgress().attempts=0 end
         status = true
         max_toch = i
         ws.lowMatSaid = false
