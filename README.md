@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <strong>Версия на GitHub: 1.38</strong> · Windows · Arizona RP · MoonLoader<br>
+  <strong>Версия на GitHub: 1.39</strong> · Windows · Arizona RP · MoonLoader<br>
   Выбери предмет и целевой уровень — скрипт выполнит повторяющиеся действия заточки.
 </p>
 
@@ -67,7 +67,7 @@ moonloader/
 
 Да. Скачай [autozatochka.lua](https://github.com/andergr0ynd/zatochka/releases/latest/download/autozatochka.lua), положи его в `moonloader` и перезагрузи скрипты.
 
-Звук может загрузиться автоматически. Библиотеки при ручной установке возьми из [lib](lib); готовый комплект уже содержит их. Определение типов предметов встроено в основной Lua-файл и использует базу установленного клиента Arizona.
+Звук и логотип меню загружаются автоматически, если их нет в папке скрипта. Логотип сохраняется в `moonloader/images/autozatochka-logo.png`. Библиотеки при ручной установке возьми из [lib](lib); готовый комплект уже содержит их. Определение типов предметов встроено в основной Lua-файл и использует базу установленного клиента Arizona.
 
 </details>
 

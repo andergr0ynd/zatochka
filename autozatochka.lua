@@ -2,7 +2,7 @@
     Автозаточка Arizona (CEF). Команда /mt
 ]]
 script_name('AutoZatochka')
-script_version('1.38')
+script_version('1.39')
 script_author('andergr0ynd')
 script_description('Автозаточка Arizona: одежда, оружие, Эликсир мастер (карты)')
 
@@ -290,6 +290,36 @@ local function mirrorUrlsFor(relative_path)
         RAW_GH_BASE .. relative_path,
         GITHUB_RAW_BASE .. relative_path,
     }
+end
+
+local logo = { path=getWorkingDirectory() .. '\\images\\autozatochka-logo.png' }
+
+function logo.isPng(path)
+    local head=readFileHead(path,24)
+    return #head==24 and head:sub(1,8)=='\137PNG\13\10\26\10'
+        and head:sub(13,16)=='IHDR'
+end
+
+function logo.fetch()
+    if logo.isPng(logo.path) then return end
+    local part=logo.path .. '.part'
+    local urls={RAW_GH_BASE .. 'images/autozatochka-logo.png',
+        GITHUB_CDN_BASE .. 'images/autozatochka-logo.png',
+        GITHUB_RAW_BASE .. 'images/autozatochka-logo.png'}
+    for _,url in ipairs(urls) do
+        if downloadToFile(url,part,20) and logo.isPng(part) then
+            if doesFileExist(logo.path) then pcall(os.remove,logo.path) end
+            if os.rename(part,logo.path) then logo.tried=false;return end
+        end
+    end
+    pcall(os.remove,part)
+end
+
+function logo.load()
+    if logo.texture or logo.tried or not logo.isPng(logo.path) then return end
+    logo.tried=true
+    local ok,texture=pcall(imgui.CreateTextureFromFile,logo.path)
+    if ok and texture then logo.texture=texture end
 end
 
 local as_action = require('moonloader').audiostream_state
@@ -2156,6 +2186,11 @@ function main()
     sampRegisterChatCommand('mt', function() WinState[0] = not WinState[0] end)
     sampAddChatMessage('[AutoZatochka] ' .. u8:decode('загружен. /mt'), -1)
 
+    lua_thread.create(function()
+        wait(300)
+        pcall(logo.fetch)
+    end)
+
     -- Загрузка звука успешной заточки с GitHub в фоне
     lua_thread.create(function()
         wait(500)
@@ -2478,11 +2513,19 @@ imgui.OnFrame(function() return WinState[0] end,
         local p = imgui.GetWindowPos()
         local sz = imgui.GetWindowSize()
         dl:AddRectFilled(p, imgui.ImVec2(p.x + 4, p.y + sz.y), imgui.ColorConvertFloat4ToU32(ws.uiAccent()), 2)
-        imgui.SetCursorPos(imgui.ImVec2(16, 12))
-        imgui.PushStyleColor(imgui.Col.Text, ws.uiAccent())
-        imgui.Text('AutoZatochka')
-        imgui.PopStyleColor()
-        imgui.SameLine()
+        logo.load()
+        if logo.texture then
+            imgui.SetCursorPos(imgui.ImVec2(16, 3))
+            imgui.Image(logo.texture,imgui.ImVec2(210,40),
+                imgui.ImVec2(0.012,0.23),imgui.ImVec2(0.985,0.81))
+            imgui.SetCursorPos(imgui.ImVec2(240, 12))
+        else
+            imgui.SetCursorPos(imgui.ImVec2(16, 12))
+            imgui.PushStyleColor(imgui.Col.Text, ws.uiAccent())
+            imgui.Text('AutoZatochka')
+            imgui.PopStyleColor()
+            imgui.SameLine()
+        end
         imgui.TextDisabled('  Arizona  ·  ' .. tostring(thisScript().version or ''))
         imgui.SetCursorPos(imgui.ImVec2(W - 76, 8))
         if ws.uiIcon('##gear', 28) then
